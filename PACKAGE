@@ -1,0 +1,23 @@
+NAME=sl-pkg
+VERSION=git
+URL="https://github.com/ntvmb/sl-pkg.git"
+DEPENDS=(bash coreutils curl sqlite tar xz gzip sed)
+OPTDEPENDS=(git bzip2)
+PATCHES=()
+METAPACKAGE=false
+
+prepare() {
+    return 0
+}
+
+build() {
+    return 1
+}
+
+install() {
+    return 1
+}
+
+postinst() {
+    return 1
+}

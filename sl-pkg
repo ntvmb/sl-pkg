@@ -1,0 +1,164 @@
+#!/bin/bash
+
+START_PWD=$(pwd)
+DRY_RUN=false
+HAS_SPECIFIED_COMMAND=false
+COMMAND=
+CACHE_DIR="$HOME/.cache/sl-pkg"
+DOWNLOAD_AND_BUILD=false
+RUN_HELP=false
+CONFIGFILE=/etc/sl-pkg.conf
+PACKAGES=()
+MIRROR=.
+
+print_help() {
+  echo "\
+Usage: $0 [options] command
+Commands:
+  install: install packages
+  download: download packages
+  remove: remove packages
+  update: update system"
+}
+
+# a more secure source command that doesn't allow for arbitrary command execution
+source_s() {
+  while read p; do
+    case $p in
+      *'$('*|*\;*|*\&*|*\|*)
+        echo "error: bad config line $p"
+        exit 1
+        ;;
+      *=*)
+        # filter through declare to prevent ACE
+        eval "declare -g $(cut -d'=' -f1<<<$p)=$(cut -d'=' -f2<<<$p)"
+        if [ $? -ne 0 ]; then
+          echo "error: bad config line $p"
+          exit 1
+        fi
+        ;;
+      \#*)
+        ;;
+      *)
+        echo "error: bad config line $p"
+        exit 1
+        ;;
+    esac
+  done <$1
+  unset p
+}
+
+get_pkginfo() {
+  PKG="$1"
+  mkdir $PKG &>/dev/null
+  cd $PKG
+  curl -sO "$MIRROR/$PKG/PACKAGE"
+  if [ $? -ne 0 ]; then
+    cd ..
+    rm -rf $PKG
+    echo "error: cannot find package $PKG"
+    return 1
+  fi
+}
+
+download_pkg() {
+  if [ $VERSION = "git" ]; then
+    git clone --recursive $URL
+    if [ $? -ne 0 ]; then
+      echo "error: failed to clone git repository for $1 (is git installed?)"
+      return 1
+    fi
+  else
+    curl -O $URL
+    if [ $? -ne 0 ]; then
+      echo "error: failed to download package $1"
+      return 1
+    fi
+  fi
+}
+
+download_cmd() {
+  if [ ${#PACKAGES[@]} -eq 0 ]; then
+    echo "error: no packages specified"
+    return 1
+  fi
+  for PKG in ${PACKAGES[@]}; do
+    cd $CACHE_DIR
+    get_pkginfo $PKG || return 1
+    source PACKAGE
+    cd $START_PWD
+    download_pkg $PKG || return 1
+  done
+  cd $START_PWD
+  return 0
+}
+
+if [ -f $CONFIGFILE ]; then
+  source_s /etc/sl-pkg.conf
+elif [ -f ./sl-pkg.conf ]; then
+  source_s ./sl-pkg.conf
+else
+  echo "error: no config file found"
+  exit 1
+fi
+
+for i in $@; do
+  case $i in
+    -n|--dry-run)
+      DRY_RUN=true
+      ;;
+    -b|--build)
+      DOWNLOAD_AND_BUILD=true
+      ;;
+    -h|--help)
+      RUN_HELP=true
+      ;;
+    -*)
+      echo "error: unrecognized option $i"
+      echo "run $0 --help for command usage"
+      ;;
+    *)
+      if [ "$HAS_SPECIFIED_COMMAND" = "false" ]; then
+        COMMAND=$i
+        HAS_SPECIFIED_COMMAND=true
+      else
+        PACKAGES+=("$i")
+      fi
+      ;;
+  esac
+done
+
+if [ "$RUN_HELP" = "true" ]; then
+  print_help $COMMAND
+  exit
+fi
+
+if [ "$DOWNLOAD_AND_BUILD" = "true" -a "$COMMAND" != "download" ]; then
+  echo "error: the --build switch is not recognized for command $COMMAND"
+  exit 1
+fi
+
+if [ ! -d "$CACHE_DIR" ]; then
+  if [ -a "$CAHCE_DIR" ]; then
+    echo "error: $CACHE_DIR already exists and is not a directory"
+    exit 1
+  else
+    mkdir -p $CACHE_DIR
+    if [ $? -ne 0 ]; then
+      echo "fatal: cannot create cache directory"
+      exit 1
+    fi
+  fi
+fi
+
+case $COMMAND in
+  download)
+    download_cmd
+    exit $?
+    ;;
+  *)
+    echo "error: no command specified"
+    echo "try running $0 --help"
+    exit 1
+    ;;
+esac
