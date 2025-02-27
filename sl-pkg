@@ -10,6 +10,7 @@ RUN_HELP=false
 CONFIGFILE=/etc/sl-pkg.conf
 PACKAGES=()
 MIRROR=.
+export MAKEFLAGS="-j$(nproc)"
 
 print_help() {
   echo "\
@@ -52,6 +53,7 @@ get_pkginfo() {
   PKG="$1"
   mkdir $PKG &>/dev/null
   cd $PKG
+  # curl works better than wget in my experience
   curl -sO "$MIRROR/$PKG/PACKAGE"
   if [ $? -ne 0 ]; then
     cd ..
@@ -77,6 +79,17 @@ download_pkg() {
   fi
 }
 
+build_pkg() {
+  if [ $VERSION = "git" ]; then
+    cd $PKG
+  else
+    tar xf $PKG-$VERSION.tar* 
+    cd $PKG-$(cut -d"-" -f1 <<<$VERSION)/
+  fi
+  prepare || return 1
+  build || return 1
+}
+
 download_cmd() {
   if [ ${#PACKAGES[@]} -eq 0 ]; then
     echo "error: no packages specified"
@@ -88,6 +101,7 @@ download_cmd() {
     source PACKAGE
     cd $START_PWD
     download_pkg $PKG || return 1
+    build_pkg || return 1
   done
   cd $START_PWD
   return 0
