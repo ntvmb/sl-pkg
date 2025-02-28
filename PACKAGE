@@ -1,7 +1,7 @@
 NAME=sl-pkg
 VERSION=git
 URL="https://github.com/ntvmb/sl-pkg.git"
-DEPENDS=(bash coreutils curl sqlite tar xz gzip sed make)
+DEPENDS=(bash coreutils curl sqlite tar xz gzip sed make less)
 OPTDEPENDS=(git bzip2)
 PATCHES=()
 METAPACKAGE=false

@@ -13,6 +13,7 @@ PACKAGES=()
 MIRROR=.
 PACKAGES_DB=packages.db
 VERSION=0.0.0
+EDITOR=vim
 export MAKEFLAGS="-j$(nproc)"
 
 print_help() {
@@ -52,6 +53,28 @@ source_s() {
   unset p
 }
 
+ask_to_inspect() {
+  PKG="$1"
+  read -p "inspect PACKAGE file for $PKG? (highly recommended) " yn
+  case $yn in
+    [Yy]*)
+      less PACKAGE
+      read -p "continue operations? " yn2
+      case $yn2 in
+        [Yy]*)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 get_pkginfo() {
   PKG="$1"
   mkdir $PKG &>/dev/null
@@ -68,7 +91,7 @@ get_pkginfo() {
 
 download_pkg() {
   if [ $VERSION = "git" ]; then
-    git clone --recursive $URL
+    git clone --recursive $URL $NAME-git
     if [ $? -ne 0 ]; then
       echo "error: failed to clone git repository for $1 (is git installed?)"
       return 1
@@ -87,7 +110,7 @@ download_pkg() {
 
 build_pkg() {
   if [ $VERSION = "git" ]; then
-    cd $NAME
+    cd $NAME-git
   else
     tar xf $NAME-$VERSION.tar* 
     cd $NAME-$VERSION ||
@@ -109,6 +132,10 @@ download_cmd() {
   for PKG in ${PACKAGES[@]}; do
     cd $USR_CACHE_DIR
     get_pkginfo $PKG || return 1
+    ask_to_inspect $PKG || return 1
+  done
+  for PKG in ${PACKAGES[@]}; do
+    cd $USR_CACHE_DIR/$PKG
     source PACKAGE
     cd $START_PWD
     download_pkg || return 1
@@ -171,6 +198,20 @@ if [ ! -d "$CACHE_DIR" ]; then
     exit 1
   else
     mkdir -p $CACHE_DIR
+    if [ $? -ne 0 ]; then
+      echo "fatal: cannot create cache directory"
+      echo "note: first-time setup must be done as root"
+      exit 1
+    fi
+  fi
+fi
+
+if [ ! -d "$USR_CACHE_DIR" ]; then
+  if [ -a "$USR_CAHCE_DIR" ]; then
+    echo "error: $USR_CACHE_DIR already exists and is not a directory"
+    exit 1
+  else
+    mkdir -p $USR_CACHE_DIR
     if [ $? -ne 0 ]; then
       echo "fatal: cannot create cache directory"
       exit 1
