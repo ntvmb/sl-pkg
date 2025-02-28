@@ -13,6 +13,7 @@ PACKAGES=()
 MIRROR=.
 PACKAGES_DB=packages.db
 VERSION=0.0.0
+ABSOLUTE_VERSION=1
 EDITOR=vim
 export MAKEFLAGS="-j$(nproc)"
 
@@ -53,6 +54,25 @@ source_s() {
   unset p
 }
 
+create_cache_dir() {
+  if [ ! -d "$1" ]; then
+    if [ -a "$1" ]; then
+      echo "error: $CACHE_DIR already exists and is not a directory"
+      exit 1
+    else
+      mkdir -p $1
+      if [ $? -ne 0 ]; then
+        echo "fatal: cannot create cache directory"
+        echo "note: if this is your first time using sl-pkg, you must first"
+        echo "run $0 first_run as root."
+        exit 1
+      fi
+    fi
+  fi
+}
+
+# PACKAGE files can be malicious; it's important to ensure they aren't before
+# letting sl-pkg continue.
 ask_to_inspect() {
   PKG="$1"
   read -p "inspect PACKAGE file for $PKG? (highly recommended) " yn
@@ -70,7 +90,7 @@ ask_to_inspect() {
       esac
       ;;
     *)
-      return 1
+      return 0
       ;;
   esac
 }
@@ -91,9 +111,11 @@ get_pkginfo() {
 
 download_pkg() {
   if [ $VERSION = "git" ]; then
-    git clone --recursive $URL $NAME-git
+    git clone --recursive $URL $NAME-git-$ABOSULTE_VERSION || (
+      cd $NAME-git-$ABOSULTE_VERSION && git pull
+    )
     if [ $? -ne 0 ]; then
-      echo "error: failed to clone git repository for $1 (is git installed?)"
+      echo "error: failed to clone/update git repository for $1 (is git installed?)"
       return 1
     fi
   else
@@ -110,7 +132,7 @@ download_pkg() {
 
 build_pkg() {
   if [ $VERSION = "git" ]; then
-    cd $NAME-git
+    cd $NAME-git-$ABOSULTE_VERSION
   else
     tar xf $NAME-$VERSION.tar* 
     cd $NAME-$VERSION ||
@@ -122,6 +144,17 @@ build_pkg() {
   fi
   prepare || return 1
   build || return 1
+}
+
+install_pkg() {
+  install || return 1
+  postinst || return 1
+  # $0 detect ${DEPENDS[@]}
+  sqlite3 $INSTALLED_PACKAGES_DB <<<"
+  INSERT INTO InstalledPackages VALUES (
+    '$NAME', '$VERSION', $ABSOLUTE_VERSION, '$(date -uI)'
+  );
+  "
 }
 
 download_cmd() {
@@ -142,6 +175,31 @@ download_cmd() {
     if [ $DOWNLOAD_AND_BUILD = "true" ]; then
       build_pkg || return 1
     fi
+  done
+  cd $START_PWD
+  return 0
+}
+
+install_cmd() {
+  if [ $EUID -ne 0 ]; then
+    echo "error: this command must be run as root"
+    return 1
+  fi
+  if [ ${#PACKAGES[@]} -eq 0 ]; then
+    echo "error: no packages specified"
+    return 1
+  fi
+  for PKG in ${PACKAGES[@]}; do
+    cd $CACHE_DIR
+    get_pkginfo $PKG || return 1
+    ask_to_inspect $PKG || return 1
+  done
+  for PKG in ${PACKAGES[@]}; do
+    cd $CACHE_DIR/$PKG
+    source PACKAGE
+    download_pkg || return 1
+    build_pkg || return 1
+    install_pkg || return 1
   done
   cd $START_PWD
   return 0
@@ -192,32 +250,8 @@ if [ "$DOWNLOAD_AND_BUILD" = "true" -a "$COMMAND" != "download" ]; then
   exit 1
 fi
 
-if [ ! -d "$CACHE_DIR" ]; then
-  if [ -a "$CAHCE_DIR" ]; then
-    echo "error: $CACHE_DIR already exists and is not a directory"
-    exit 1
-  else
-    mkdir -p $CACHE_DIR
-    if [ $? -ne 0 ]; then
-      echo "fatal: cannot create cache directory"
-      echo "note: first-time setup must be done as root"
-      exit 1
-    fi
-  fi
-fi
-
-if [ ! -d "$USR_CACHE_DIR" ]; then
-  if [ -a "$USR_CAHCE_DIR" ]; then
-    echo "error: $USR_CACHE_DIR already exists and is not a directory"
-    exit 1
-  else
-    mkdir -p $USR_CACHE_DIR
-    if [ $? -ne 0 ]; then
-      echo "fatal: cannot create cache directory"
-      exit 1
-    fi
-  fi
-fi
+create_cache_dir $CACHE_DIR
+create_cache_dir $USR_CACHE_DIR
 
 case $COMMAND in
   download)
@@ -227,6 +261,10 @@ case $COMMAND in
   version)
     echo "sl-pkg $VERSION"
     exit 0
+    ;;
+  install)
+    install_cmd
+    exit $?
     ;;
   *)
     echo "error: no command specified"
