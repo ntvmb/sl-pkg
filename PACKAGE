@@ -1,7 +1,7 @@
 NAME=sl-pkg
 VERSION=git
 URL="https://github.com/ntvmb/sl-pkg.git"
-DEPENDS=(bash coreutils curl sqlite tar xz gzip sed)
+DEPENDS=(bash coreutils curl sqlite tar xz gzip sed make)
 OPTDEPENDS=(git bzip2)
 PATCHES=()
 METAPACKAGE=false
@@ -11,13 +11,26 @@ prepare() {
 }
 
 build() {
-    return 1
+    return 0
 }
 
 install() {
-    return 1
+    install -v sl-pkg /usr/bin/sl-pkg || return 1
+    if [ ! -N /etc/sl-pkg.conf ]; then
+        install -v sl-pkg.conf /etc/sl-pkg.conf || return 1
+    else
+        install -v sl-pkg.conf /etc/sl-pkg.conf.new || return 1
+        echo "warning: /etc/sl-pkg.conf installed as /etc/sl-pkg.conf.new"
+    fi
+    return 0
 }
 
 postinst() {
-    return 1
+    $NAME detect
+    return 0
+}
+
+detect() {
+    $NAME version
+    return $?
 }
