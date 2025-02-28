@@ -101,7 +101,7 @@ get_pkginfo() {
   cd $PKG
   # curl works better than wget in my experience
   curl -sO "$MIRROR/$PKG/PACKAGE"
-  if [ $? -ne 0 ]; then
+  if [ ! -f PACKAGE ]; then
     cd ..
     rm -rf $PKG
     echo "error: cannot find package $PKG"
@@ -150,11 +150,19 @@ install_pkg() {
   install || return 1
   postinst || return 1
   # $0 detect ${DEPENDS[@]}
-  sqlite3 $INSTALLED_PACKAGES_DB <<<"
-  INSERT INTO InstalledPackages VALUES (
-    '$NAME', '$VERSION', $ABSOLUTE_VERSION, '$(date -uI)'
-  );
-  "
+  if [ -z "$(sqlite3 $INSTALLED_PACKAGES_DB <<<"SELECT Name FROM InstalledPackages WHERE Name='$NAME';")" ]; then
+    sqlite3 $INSTALLED_PACKAGES_DB <<<"
+    INSERT INTO InstalledPackages VALUES (
+      '$NAME', '$VERSION', $ABSOLUTE_VERSION, '$(date -uI)'
+    );
+    "
+  else
+    sqlite3 $INSTALLED_PACKAGES_DB <<<"
+    UPDATE InstalledPackages
+    SET Version='$VERSION', AbsoluteVersion='$ABSOLUTE_VERSION'
+    WHERE Name='$NAME';
+    "
+  fi
 }
 
 download_cmd() {
@@ -203,6 +211,44 @@ install_cmd() {
   done
   cd $START_PWD
   return 0
+}
+
+detect_cmd() {
+  if [ $EUID -ne 0 ]; then
+    echo "error: this command must be run as root"
+    return 1
+  fi
+  if [ ${#PACKAGES[@]} -eq 0 ]; then
+    echo "error: detecting all packages is not yet implemented"
+    return 1
+  fi
+  for PKG in ${PACKAGES[@]}; do
+    cd $CACHE_DIR
+    get_pkginfo $PKG || return 1
+    ask_to_inspect $PKG || return 1
+  done
+  for PKG in ${PACKAGES[@]}; do
+    cd $CACHE_DIR/$PKG
+    source PACKAGE
+    detect
+    if [ $? -eq 0 ]; then
+      echo "$PKG version $VERSION is installed"
+      if [ -z "$(sqlite3 $INSTALLED_PACKAGES_DB <<<"SELECT Name FROM InstalledPackages WHERE Name='$PKG';")" ]; then
+        sqlite3 $INSTALLED_PACKAGES_DB <<<"
+        INSERT INTO InstalledPackages VALUES (
+          '$PKG', '$VERSION', $ABSOLUTE_VERSION, '$(date -uI)'
+        );
+        "
+      fi
+    else
+      echo "$PKG is not installed"
+      if [ -n "$(sqlite3 $INSTALLED_PACKAGES_DB <<<"SELECT Name FROM InstalledPackages WHERE Name='$PKG';")" ]; then
+        sqlite3 $INSTALLED_PACKAGES_DB <<<"
+        DELETE FROM InstalledPackages WHERE Name='$PKG';
+        "
+      fi
+    fi
+  done
 }
 
 if [ -f $CONFIGFILE ]; then
@@ -264,6 +310,10 @@ case $COMMAND in
     ;;
   install)
     install_cmd
+    exit $?
+    ;;
+  detect)
+    detect_cmd
     exit $?
     ;;
   *)
