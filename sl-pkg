@@ -12,8 +12,8 @@ CONFIGFILE=/etc/sl-pkg.conf
 PACKAGES=()
 MIRROR=.
 PACKAGES_DB=packages.db
-VERSION=0.0.1
-ABSOLUTE_VERSION=1
+VERSION=0.0.2
+ABSOLUTE_VERSION=2
 EDITOR=vim
 export MAKEFLAGS="-j$(nproc)"
 
@@ -100,7 +100,7 @@ get_pkginfo() {
   mkdir $PKG &>/dev/null
   cd $PKG
   # curl works better than wget in my experience
-  curl -sO "$MIRROR/$PKG/PACKAGE"
+  curl -sOL "$MIRROR/$PKG/PACKAGE"
   if [ ! -f PACKAGE ]; then
     cd ..
     rm -rf $PKG
@@ -145,14 +145,14 @@ download_pkg() {
     fi
     cd ..
   else
-    curl -O $URL
+    curl -OL $URL
     local FILENAME="$(basename -- $URL)"
     local EXTENSION="${FILENAME##*.}"
     local FILENAME="${FILENAME%.*}"
     # ensure a consistent naming convention
     mv "$(basename -- $URL)" "$NAME-$VERSION.tar.$EXTENSION"
     for PATCH in ${PATCHES[@]}; do
-      curl -O $PATCH
+      curl -OL $PATCH
     done
     if [ $? -ne 0 ]; then
       echo "error: failed to download package $1"
