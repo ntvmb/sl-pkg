@@ -12,7 +12,7 @@ CONFIGFILE=/etc/sl-pkg.conf
 PACKAGES=()
 MIRROR=.
 PACKAGES_DB=packages.db
-VERSION=0.0.0
+VERSION=0.0.1
 ABSOLUTE_VERSION=1
 EDITOR=vim
 export MAKEFLAGS="-j$(nproc)"
@@ -109,7 +109,32 @@ get_pkginfo() {
   fi
 }
 
+compare_versions() {
+    if [[ $1 == $2 ]]; then
+        return 0
+    fi
+    local IFS=.
+    # replace dashes with dots
+    local i ver1=$(sed "s/-/./g" <<<$1) ver2=$(sed "s/-/./g" <<<$2)
+    # fill empty fields in ver1 with zeros
+    for ((i=${#ver1[@]}; i<${#ver2[@]}; i++)); do
+        ver1[i]=0
+    done
+    for ((i=0; i<${#ver1[@]}; i++)); do
+        if ((10#${ver1[i]:=0} > 10#${ver2[i]:=0})); then
+            return 1
+        fi
+        if ((10#${ver1[i]} < 10#${ver2[i]})); then
+            return 2
+        fi
+    done
+    return 0
+}
+
 download_pkg() {
+  if [ "$METAPACKAGE" = "true" ]; then
+    return 0
+  fi
   if [ $VERSION = "git" ]; then
     git clone --recursive $URL $NAME-git-$ABOSULTE_VERSION || (
       cd $NAME-git-$ABOSULTE_VERSION && git pull
@@ -118,8 +143,14 @@ download_pkg() {
       echo "error: failed to clone/update git repository for $1 (is git installed?)"
       return 1
     fi
+    cd ..
   else
     curl -O $URL
+    local FILENAME="$(basename -- $URL)"
+    local EXTENSION="${FILENAME##*.}"
+    local FILENAME="${FILENAME%.*}"
+    # ensure a consistent naming convention
+    mv "$(basename -- $URL)" "$NAME-$VERSION.tar.$EXTENSION"
     for PATCH in ${PATCHES[@]}; do
       curl -O $PATCH
     done
@@ -131,36 +162,36 @@ download_pkg() {
 }
 
 build_pkg() {
+  if [ "$METAPACKAGE" = "true" ]; then
+    return 0
+  fi
   if [ $VERSION = "git" ]; then
     cd $NAME-git-$ABOSULTE_VERSION
   else
-    tar xf $NAME-$VERSION.tar* 
-    cd $NAME-$VERSION ||
-      cd $NAME-$(cut -d"-" -f1 <<<$VERSION)/
-    if [ $? -ne 0 ]; then
-      echo "error: unsupported naming scheme detected"
-      return 1
-    fi
+    mkdir -p $NAME-$VERSION
+    cd $NAME-$VERSION
+    tar xf ../$NAME-$VERSION.tar* --no-same-owner --strip-components=1
   fi
   prepare || return 1
   build || return 1
 }
 
 install_pkg() {
-  install || return 1
+  PKG="$1"
+  do_install || return 1
   postinst || return 1
-  # $0 detect ${DEPENDS[@]}
-  if [ -z "$(sqlite3 $INSTALLED_PACKAGES_DB <<<"SELECT Name FROM InstalledPackages WHERE Name='$NAME';")" ]; then
+  $0 detect ${DEPENDS[@]}
+  if [ -z "$(sqlite3 $INSTALLED_PACKAGES_DB <<<"SELECT Name FROM InstalledPackages WHERE Name='$PKG';")" ]; then
     sqlite3 $INSTALLED_PACKAGES_DB <<<"
     INSERT INTO InstalledPackages VALUES (
-      '$NAME', '$VERSION', $ABSOLUTE_VERSION, '$(date -uI)'
+      '$PKG', '$VERSION', $ABSOLUTE_VERSION, '$(date -uI)'
     );
     "
   else
     sqlite3 $INSTALLED_PACKAGES_DB <<<"
     UPDATE InstalledPackages
     SET Version='$VERSION', AbsoluteVersion='$ABSOLUTE_VERSION'
-    WHERE Name='$NAME';
+    WHERE Name='$PKG';
     "
   fi
 }
@@ -179,9 +210,9 @@ download_cmd() {
     cd $USR_CACHE_DIR/$PKG
     source PACKAGE
     cd $START_PWD
-    download_pkg || return 1
+    download_pkg $PKG || return 1
     if [ $DOWNLOAD_AND_BUILD = "true" ]; then
-      build_pkg || return 1
+      build_pkg $PKG || return 1
     fi
   done
   cd $START_PWD
@@ -205,9 +236,9 @@ install_cmd() {
   for PKG in ${PACKAGES[@]}; do
     cd $CACHE_DIR/$PKG
     source PACKAGE
-    download_pkg || return 1
-    build_pkg || return 1
-    install_pkg || return 1
+    download_pkg $PKG || return 1
+    build_pkg $PKG || return 1
+    install_pkg $PKG || return 1
   done
   cd $START_PWD
   return 0
@@ -227,6 +258,7 @@ detect_cmd() {
     get_pkginfo $PKG || return 1
     ask_to_inspect $PKG || return 1
   done
+  DETECTION_STATUSES=()
   for PKG in ${PACKAGES[@]}; do
     cd $CACHE_DIR/$PKG
     source PACKAGE
@@ -240,6 +272,7 @@ detect_cmd() {
         );
         "
       fi
+      DETECTION_STATUSES+=(0)
     else
       echo "$PKG is not installed"
       if [ -n "$(sqlite3 $INSTALLED_PACKAGES_DB <<<"SELECT Name FROM InstalledPackages WHERE Name='$PKG';")" ]; then
@@ -247,8 +280,14 @@ detect_cmd() {
         DELETE FROM InstalledPackages WHERE Name='$PKG';
         "
       fi
+      DETECTION_STATUSES+=(1)
     fi
   done
+  if [[ " ${DETECTION_STATUSES[@]} " =~ " 1 " ]]; then
+    return 1
+  else
+    return 0
+  fi
 }
 
 if [ -f $CONFIGFILE ]; then
