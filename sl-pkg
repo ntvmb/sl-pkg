@@ -14,8 +14,8 @@ PACKAGES=()
 DEPENDENCIES=()
 MIRROR=.
 PACKAGES_DB=packages.db
-VERSION=0.0.3
-ABSOLUTE_VERSION=3
+VERSION=0.0.4
+ABSOLUTE_VERSION=4
 BOOTSTRAP_VERSION=12.2
 EDITOR=vim
 TRUST_ALL=false
@@ -357,11 +357,6 @@ bootstrap() {
     MAKEFLAGS="-j$(nproc)"
     TESTSUITEFLAGS="-j$(nproc)"
   fi
-  CHROOT_ENV="HOME=/root          \
-    TERM=\"$TERM\"                \
-    PATH=/usr/bin:/usr/sbin       \
-    MAKEFLAGS=\"$MAKEFLAGS\"      \
-    TESTSUITEFLAGS=\"$TESTSUITEFLAGS\" "
   cp /etc/inittab "$TARGET/etc/inittab"
   cp /etc/profile "$TARGET/etc/profile"
   cp /etc/inputrc "$TARGET/etc/inputrc"
@@ -386,7 +381,15 @@ EOF
     SLPKGFLAGS="--trust-all"
   fi
   # some packages need manual attention so use of xargs's -a switch is needed
-  xargs -a "$WITH_PACKAGES" chroot "$TARGET" /usr/bin/env -i $CHROOT_ENV /usr/bin/sl-pkg $SLPKGFLAGS install || return 1
+  xargs -a "$WITH_PACKAGES"          \
+    chroot "$TARGET"                 \
+    /usr/bin/env -i                  \
+    HOME=/root                       \
+    TERM="$TERM"                     \
+    PATH=/usr/bin:/usr/sbin          \
+    MAKEFLAGS="$MAKEFLAGS"           \
+    TESTSUITEFLAGS="$TESTSUITEFLAGS" \
+    /usr/bin/sl-pkg $SLPKGFLAGS install || return 1
   umount -R "$TARGET"/{dev,proc,sys,run}
   echo "Cleaning up..."
   rm -rf "$TARGET/var/cache/sl-pkg/"* "$TARGET/root/.cache/sl-pkg/"*
@@ -467,7 +470,9 @@ if [ "$KEEP_GOING" = "true" ] && [ "$COMMAND" != "bootstrap" ]; then
   exit 1
 fi
 
-if [ "$FORCE_INSTALL" = "true" ] && [ "$COMMAND" != "install" ]; then
+if [ "$FORCE_INSTALL" = "true" ] && !(
+  [ "$COMMAND" = "install" ] || [ "$COMMAND" = "bootstrap" ]
+); then
   echo "error: the --force-install switch is not recognized for command $COMMAND"
   exit 1
 fi
