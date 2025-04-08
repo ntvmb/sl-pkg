@@ -1,6 +1,7 @@
 #!/bin/bash
 
 START_PWD=$(pwd)
+BINNAME=$(basename $0)
 DRY_RUN=false
 HAS_SPECIFIED_COMMAND=false
 COMMAND=
@@ -10,21 +11,33 @@ DOWNLOAD_AND_BUILD=false
 RUN_HELP=false
 CONFIGFILE=/etc/sl-pkg.conf
 PACKAGES=()
+DEPENDENCIES=()
 MIRROR=.
 PACKAGES_DB=packages.db
-VERSION=0.0.2
-ABSOLUTE_VERSION=2
+VERSION=0.0.3
+ABSOLUTE_VERSION=3
+BOOTSTRAP_VERSION=12.2
 EDITOR=vim
+TRUST_ALL=false
+KEEP_GOING=false
+FORCE_INSTALL=false
 export MAKEFLAGS="-j$(nproc)"
 
 print_help() {
-  echo "\
-Usage: $0 [options] command
+  case $1 in
+    *)
+      echo "\
+Usage: $BINNAME [options] command
 Commands:
   install: install packages
   download: download packages
   remove: remove packages
-  update: update system"
+  update: update system (not implemented)
+  version: print version information and exit
+  detect: detect untracked packages
+  bootstrap: deploy an LFS system"
+      ;;
+  esac
 }
 
 # a more secure source command that doesn't allow for arbitrary command execution
@@ -64,7 +77,7 @@ create_cache_dir() {
       if [ $? -ne 0 ]; then
         echo "fatal: cannot create cache directory"
         echo "note: if this is your first time using sl-pkg, you must first"
-        echo "run $0 first_run as root."
+        echo "run $BINNAME first_run as root."
         exit 1
       fi
     fi
@@ -74,6 +87,9 @@ create_cache_dir() {
 # PACKAGE files can be malicious; it's important to ensure they aren't before
 # letting sl-pkg continue.
 ask_to_inspect() {
+  if [ "$TRUST_ALL" = "true" ]; then
+    return 0
+  fi
   PKG="$1"
   read -p "inspect PACKAGE file for $PKG? (highly recommended) " yn
   case $yn in
@@ -109,6 +125,7 @@ get_pkginfo() {
   fi
 }
 
+# NOTE: for future use
 compare_versions() {
     if [[ $1 == $2 ]]; then
         return 0
@@ -180,7 +197,7 @@ install_pkg() {
   PKG="$1"
   do_install || return 1
   postinst || return 1
-  $0 detect ${DEPENDS[@]}
+  # $0 detect ${DEPENDS[@]}
   if [ -z "$(sqlite3 $INSTALLED_PACKAGES_DB <<<"SELECT Name FROM InstalledPackages WHERE Name='$PKG';")" ]; then
     sqlite3 $INSTALLED_PACKAGES_DB <<<"
     INSERT INTO InstalledPackages VALUES (
@@ -237,7 +254,10 @@ install_cmd() {
     cd $CACHE_DIR/$PKG
     source PACKAGE
     download_pkg $PKG || return 1
-    build_pkg $PKG || return 1
+    build_pkg $PKG || 
+    if [ "$FORCE_INSTALL" != "true" ]; then
+      return 1
+    fi
     install_pkg $PKG || return 1
   done
   cd $START_PWD
@@ -290,6 +310,90 @@ detect_cmd() {
   fi
 }
 
+bootstrap() {
+  if [ $EUID -ne 0 ]; then
+    echo "error: this command must be run as root"
+    return 1
+  fi
+  TRUST_ALL=true
+  TARGET="${PACKAGES[0]}"
+  if [ ! -d "$TARGET" ]; then
+    echo "error: $TARGET does not exist or is not a directory"
+  fi
+  if ! mountpoint -q "$TARGET"; then
+    echo "warning: $TARGET is not a mountpoint"
+  fi
+  PACKAGES=()
+  cd $CACHE_DIR
+  curl -fsOL "$MIRROR/base-$BOOTSTRAP_VERSION/RELEASE" || (
+    echo "error: cannot find release $BOOTSTRAP_VERSION"
+    return 1
+  )
+  source_s RELEASE
+  curl -sOL "$MIRROR/base-$BOOTSTRAP_VERSION/$WITH_PACKAGES"
+  echo "Downloading base tarball..."
+  curl -OL "$URL"
+  echo "Extracting..."
+  tar -C $TARGET -xf "$(basename "$URL")" || (
+    echo "error: failed to extract the base system"
+    return 1
+  )
+  echo "Preparing chroot environment..."
+  mkdir -p "$TARGET"/{dev,proc,sys,run}
+  mount --bind /dev "$TARGET/dev"
+  mount -t devpts devpts -o gid=5,mode=0620 "$TARGET/dev/pts"
+  mount -t proc proc "$TARGET/proc"
+  mount -t sysfs sysfs "$TARGET/sys"
+  mount -t tmpfs tmpfs "$TARGET/run"
+  if [ -h "$TARGET/dev/shm" ]; then
+    install -d -m 1777 "$TARGET$(realpath /dev/shm)"
+  else
+    mount -t tmpfs -o nosuid,nodev tmpfs "$TARGET/dev/shm"
+  fi
+  if [ "$KEEP_GOING" = "true" ]; then
+    MAKEFLAGS="-k -j$(nproc)"
+    TESTSUITEFLAGS="-k -j$(nproc)"
+  else
+    MAKEFLAGS="-j$(nproc)"
+    TESTSUITEFLAGS="-j$(nproc)"
+  fi
+  CHROOT_ENV="HOME=/root          \
+    TERM=\"$TERM\"                \
+    PATH=/usr/bin:/usr/sbin       \
+    MAKEFLAGS=\"$MAKEFLAGS\"      \
+    TESTSUITEFLAGS=\"$TESTSUITEFLAGS\" "
+  cp /etc/inittab "$TARGET/etc/inittab"
+  cp /etc/profile "$TARGET/etc/profile"
+  cp /etc/inputrc "$TARGET/etc/inputrc"
+  cat > "$TARGET/etc/shells" << "EOF"
+# Begin /etc/shells
+
+/bin/sh
+/bin/bash
+
+# End /etc/shells
+EOF
+  cp -t "$TARGET/etc/sysconfig" /etc/sysconfig/{clock,console,ifconfig.*,rc.site}
+  cp /etc/resolv.conf "$TARGET/etc/resolv.conf"
+  cp /etc/hosts "$TARGET/etc/hosts"
+  mkdir -p "$TARGET/etc/udev/rules.d"
+  cp -t "$TARGET/etc/udev/rules.d/" /etc/udev/rules.d/*
+  hostname >"$TARGET/etc/hostname"
+  echo "Entering chroot environment..."
+  if [ "$KEEP_GOING" = "true" ]; then
+    SLPKGFLAGS="--trust-all --force-install"
+  else
+    SLPKGFLAGS="--trust-all"
+  fi
+  # some packages need manual attention so use of xargs's -a switch is needed
+  xargs -a "$WITH_PACKAGES" chroot "$TARGET" /usr/bin/env -i $CHROOT_ENV /usr/bin/sl-pkg $SLPKGFLAGS install || return 1
+  umount -R "$TARGET"/{dev,proc,sys,run}
+  echo "Cleaning up..."
+  rm -rf "$TARGET/var/cache/sl-pkg/"* "$TARGET/root/.cache/sl-pkg/"*
+  echo "Bootstrap success."
+  return 0 
+}
+
 if [ -f $CONFIGFILE ]; then
   source_s /etc/sl-pkg.conf
 elif [ -f ./sl-pkg.conf ]; then
@@ -299,28 +403,51 @@ else
   exit 1
 fi
 
-for i in $@; do
-  case $i in
+while [[ $# -gt 0 ]]; do
+  case $1 in
     -n|--dry-run)
       DRY_RUN=true
+      shift
       ;;
     -b|--build)
       DOWNLOAD_AND_BUILD=true
+      shift
       ;;
     -h|--help)
       RUN_HELP=true
+      shift
+      ;;
+    -k|--keep-going)
+      KEEP_GOING=true
+      FORCE_INSTALL=true
+      shift
+      ;;
+    --trust-all)
+      TRUST_ALL=true
+      shift
+      ;;
+    --lfs-version)
+      BOOTSTRAP_VERSION=$2
+      shift
+      shift
+      ;;
+    --force-install)
+      FORCE_INSTALL=true
+      shift
       ;;
     -*)
-      echo "error: unrecognized option $i"
-      echo "run $0 --help for command usage"
+      echo "error: unrecognized option $1"
+      echo "run $BINNAME --help for command usage"
+      exit 1
       ;;
     *)
       if [ "$HAS_SPECIFIED_COMMAND" = "false" ]; then
-        COMMAND=$i
+        COMMAND=$1
         HAS_SPECIFIED_COMMAND=true
       else
-        PACKAGES+=("$i")
+        PACKAGES+=("$1")
       fi
+      shift
       ;;
   esac
 done
@@ -330,8 +457,18 @@ if [ "$RUN_HELP" = "true" ]; then
   exit
 fi
 
-if [ "$DOWNLOAD_AND_BUILD" = "true" -a "$COMMAND" != "download" ]; then
+if [ "$DOWNLOAD_AND_BUILD" = "true" ] && [ "$COMMAND" != "download" ]; then
   echo "error: the --build switch is not recognized for command $COMMAND"
+  exit 1
+fi
+
+if [ "$KEEP_GOING" = "true" ] && [ "$COMMAND" != "bootstrap" ]; then
+  echo "error: the --keep-going switch is not recognized for command $COMMAND"
+  exit 1
+fi
+
+if [ "$FORCE_INSTALL" = "true" ] && [ "$COMMAND" != "install" ]; then
+  echo "error: the --force-install switch is not recognized for command $COMMAND"
   exit 1
 fi
 
@@ -344,7 +481,7 @@ case $COMMAND in
     exit $?
     ;;
   version)
-    echo "sl-pkg $VERSION"
+    echo "$BINNAME $VERSION"
     exit 0
     ;;
   install)
@@ -355,9 +492,13 @@ case $COMMAND in
     detect_cmd
     exit $?
     ;;
+  bootstrap)
+    bootstrap
+    exit $?
+    ;;
   *)
     echo "error: no command specified"
-    echo "try running $0 --help"
+    echo "try running $BINNAME --help"
     exit 1
     ;;
 esac
