@@ -165,24 +165,26 @@ download_pkg() {
       cd $NAME-git-$ABOSULTE_VERSION && git pull
     )
     if [ $? -ne 0 ]; then
-      echo "error: failed to clone/update git repository for $1 (is git installed?)"
+      echo "fatal: failed to clone/update git repository for $1 (is git installed?)"
       return 1
     fi
     cd ..
   else
-    curl -OL $URL
+    curl -OL $URL || (
+      echo "fatal: failed to download pacakge $1"
+      return 1
+    )
     local FILENAME="$(basename -- $URL)"
     local EXTENSION="${FILENAME##*.}"
     local FILENAME="${FILENAME%.*}"
     # ensure a consistent naming convention
     mv "$(basename -- $URL)" "$NAME-$VERSION.tar.$EXTENSION"
     for PATCH in ${PATCHES[@]}; do
-      curl -OL $PATCH
+      curl -OL $PATCH || (
+        echo "error: failed to download a necessary patch for $1"
+        return 1
+      )
     done
-    if [ $? -ne 0 ]; then
-      echo "error: failed to download package $1"
-      return 1
-    fi
   fi
 }
 
@@ -281,6 +283,8 @@ detect_cmd() {
     echo "error: detecting all packages is not yet implemented"
     return 1
   fi
+  echo "warning: this functionality is deprecated and will be removed before" \
+       "release 0.1.0"
   for PKG in ${PACKAGES[@]}; do
     cd $CACHE_DIR
     get_pkginfo $PKG || return 1
@@ -326,7 +330,7 @@ bootstrap() {
   TRUST_ALL=true
   TARGET="${PACKAGES[0]}"
   if [ ! -d "$TARGET" ]; then
-    echo "error: $TARGET does not exist or is not a directory"
+    echo "fatal: $TARGET does not exist or is not a directory"
   fi
   if ! mountpoint -q "$TARGET"; then
     echo "warning: $TARGET is not a mountpoint"
@@ -334,7 +338,7 @@ bootstrap() {
   PACKAGES=()
   cd $CACHE_DIR
   curl -fsOL "$MIRROR/base-$BOOTSTRAP_VERSION/RELEASE" || (
-    echo "error: cannot find release $BOOTSTRAP_VERSION"
+    echo "fatal: cannot find release $BOOTSTRAP_VERSION"
     return 1
   )
   source_s RELEASE
@@ -343,7 +347,7 @@ bootstrap() {
   curl -OL "$URL"
   echo "Extracting..."
   tar -C $TARGET -xf "$(basename "$URL")" || (
-    echo "error: failed to extract the base system"
+    echo "fatal: failed to extract the base system"
     return 1
   )
   echo "Preparing chroot environment..."
@@ -410,7 +414,7 @@ if [ -f $CONFIGFILE ]; then
 elif [ -f ./sl-pkg.conf ]; then
   source_s ./sl-pkg.conf
 else
-  echo "error: no config file found"
+  echo "fatal: no config file found"
   exit 1
 fi
 
