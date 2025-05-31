@@ -14,8 +14,8 @@ PACKAGES=()
 DEPENDENCIES=()
 MIRROR=.
 PACKAGES_DB=packages.db
-VERSION=0.0.4
-ABSOLUTE_VERSION=4
+VERSION=0.0.5
+ABSOLUTE_VERSION=5
 BOOTSTRAP_VERSION=12.2
 EDITOR=vim
 TRUST_ALL=false
@@ -42,35 +42,51 @@ Commands:
 
 # a more secure source command that doesn't allow for arbitrary command execution
 source_s() {
+  LINE=1
   while read p; do
     case $p in
       *'$('*|*\;*|*\&*|*\|*)
-        echo "error: bad config line $p"
+        echo "error: the \$(COMMAND) syntax is not allowed in the config"
+        echo "offending line: $p (line $LINE)"
         exit 1
         ;;
       *=*)
         # filter through declare to prevent ACE
         eval "declare -g $(cut -d'=' -f1<<<$p)=$(cut -d'=' -f2<<<$p)"
         if [ $? -ne 0 ]; then
-          echo "error: bad config line $p"
+          echo -e "error: failure to declare variable in config line $LINE:\n$p"
           exit 1
         fi
         ;;
       \#*)
         ;;
       *)
-        echo "error: bad config line $p"
+        echo -e "error: invalid syntax in config line $LINE:\n$p"
         exit 1
         ;;
     esac
+    LINE=$(expr $LINE + 1)
   done <$1
   unset p
+}
+
+# if input matches [Yy]* then true else false
+yes_or_no() {
+  case $1 in
+    [Yy]*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 create_cache_dir() {
   if [ ! -d "$1" ]; then
     if [ -a "$1" ]; then
-      echo "error: $CACHE_DIR already exists and is not a directory"
+      echo "error: default cache directory $CACHE_DIR already exists" \
+           "and is not a directory"
       exit 1
     else
       mkdir -p $1
@@ -92,23 +108,11 @@ ask_to_inspect() {
   fi
   PKG="$1"
   read -p "inspect PACKAGE file for $PKG? (highly recommended) " yn
-  case $yn in
-    [Yy]*)
-      less PACKAGE
-      read -p "continue operations? " yn2
-      case $yn2 in
-        [Yy]*)
-          return 0
-          ;;
-        *)
-          return 1
-          ;;
-      esac
-      ;;
-    *)
-      return 0
-      ;;
-  esac
+  yes_or_no $yn || return 0
+  less PACKAGE
+  read -p "continue operations? " yn2
+  yes_or_no $yn2 || return 1
+  return 0
 }
 
 get_pkginfo() {
@@ -126,24 +130,28 @@ get_pkginfo() {
 }
 
 # NOTE: for future use
+# usage: compare_versions version1 version2
+# return 0 if both versions are equal
+# return 1 if version1 is newer than version2
+# return 2 if version2 is newer than version1
 compare_versions() {
     if [[ $1 == $2 ]]; then
         return 0
     fi
     local IFS=.
     # replace dashes with dots
-    local i ver1=$(sed "s/-/./g" <<<$1) ver2=$(sed "s/-/./g" <<<$2)
+    local i ver1=($(sed "s/-/./g" <<<"$1")) ver2=($(sed "s/-/./g" <<<"$2"))
     # fill empty fields in ver1 with zeros
     for ((i=${#ver1[@]}; i<${#ver2[@]}; i++)); do
-        ver1[i]=0
+      ver1[i]=0
     done
     for ((i=0; i<${#ver1[@]}; i++)); do
-        if ((10#${ver1[i]:=0} > 10#${ver2[i]:=0})); then
-            return 1
-        fi
-        if ((10#${ver1[i]} < 10#${ver2[i]})); then
-            return 2
-        fi
+      if ((10#${ver1[i]:=0} > 10#${ver2[i]:=0})); then
+        return 1
+      fi
+      if ((10#${ver1[i]} < 10#${ver2[i]})); then
+        return 2
+      fi
     done
     return 0
 }
@@ -398,7 +406,7 @@ EOF
 }
 
 if [ -f $CONFIGFILE ]; then
-  source_s /etc/sl-pkg.conf
+  source_s $CONFIGFILE
 elif [ -f ./sl-pkg.conf ]; then
   source_s ./sl-pkg.conf
 else
