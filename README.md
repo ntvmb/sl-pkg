@@ -1,3 +1,3 @@
 # Scratch Linux Packager (sl-pkg)
 
-A package manager for LFS-based systems.
+The source-based package manager from Hell
