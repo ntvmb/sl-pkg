@@ -297,7 +297,7 @@ def get_pkgvar(pkg: str, var: str, is_usr: bool = False):
         get_pkginfo(pkg, is_usr)
     os.chdir(base_path)
     # Prevent hackers from fucking up our system.
-    if not re.fullmatch(r"[A-Za-z0-9_]+"):
+    if not re.fullmatch(r"[A-Za-z0-9_]+", var):
         raise ValueError(f"Invalid variable name: {var}")
     out = subprocess.run(
         ["bash", "-c", f"source {pkg_file}; echo -n ${var}"],
