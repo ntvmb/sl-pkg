@@ -1,7 +1,7 @@
 {
-    "mirror": "https://ntvmb.github.io/pub/sl-pkg",
-    "cache_dir": "/var/cache/sl-pkg",
-    "usr_cache_dir": "$(HOME)/.cache/sl-pkg",
+    "MIRROR": "https://ntvmb.github.io/pub/sl-pkg",
+    "CACHE_DIR": "/var/cache/sl-pkg",
+    "USR_CACHE_DIR": "$(HOME)/.cache/sl-pkg",
     "env:EDITOR": "vim",
     "env:NINJAJOBS": "$(NPROC)",
     "env:MAKEFLAGS": "-j$(NPROC)"

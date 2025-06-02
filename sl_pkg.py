@@ -34,10 +34,13 @@ from itertools import zip_longest
 if sys.platform != "linux":
     raise ValueError("This program requires Linux.")
 
-__version__ = "0.0.5.1"
+__version__ = "0.0.5.2"
 _log = logging.getLogger(__name__)
 START_DIR = pathlib.PosixPath(os.getcwd())
 CONFIG_FILE = pathlib.PosixPath("/etc/sl-pkg.json")
+MIRROR = "."
+CACHE_DIR = pathlib.Path("/tmp/sl-pkg")
+USR_CACHE_DIR = pathlib.Path(os.environ["HOME"]) / ".cache" / "sl-pkg"
 COMMANDS = {
     "version": "print version information and exit",
     "download": "download packages",
@@ -55,8 +58,8 @@ class VersionNumber:
             other = self.convert(other)
         if not isinstance(other, __class__):
             raise TypeError(
-                f"can only compare {__name__} to {__name__}, str, bytes, int, \
-or float, not {type(other)}."
+                f"can only compare {__name__} to {__name__}, str, bytes, int,"
+                f" or float, not {type(other)}."
             )
 
     def __init__(self, version: Union[str, bytes, int, float]):
@@ -176,12 +179,47 @@ def print_help(
     sys.exit(0)
 
 
-def read_config():
-    if not CONFIG_FILE.exists():
-        try:
-            CONFIG_FILE = pathlib.PosixPath("./sl-pkg.conf").resolve()
-        except FileNotFoundError as e:
-            _log.critical("no config file found")
+def read_config(file: pathlib.Path = CONFIG_FILE):
+    if not file.exists():
+        file = pathlib.Path("./sl-pkg.json").resolve()
+        if not file.exists():
+            raise FileNotFoundError(
+                f"Couldn't find config file {file}, "
+                "nor could I find a config in the current directory."
+            )
+    with file.open() as conf:
+        data = json.load(conf)
+        pattern = re.compile(r"\$\([a-zA-Z0-9_]+\)")
+        for var, val in data.items():
+            # The above regex tells us if a substring should be treated as
+            # an environment variable. Expand these instances.
+            # If you try to use pattern.sub here, you're gonna regret it.
+            # This is a while loop to ensure variables are expanded even
+            # if there's nesting (which there shouldn't be but some people
+            # are insane).
+            while pattern.search(val) and var != "MIRROR":
+                for match in pattern.findall(val):
+                    # The use of str.strip is appropriate here because of
+                    # the restrictions we put using the regex pattern.
+                    val = val.replace(match, os.environ[match.strip("$()")])
+            if not re.match("[A-Za-z0-9_]+", var.removeprefix("env:")):
+                raise ValueError(
+                    f"Illegal variable name: {var.removeprefix("env:")}\n"
+                    "Variable names can only contain alphanumeric characters and underscores."
+                )
+            if var.startswith("env:"):
+                os.environ[var.removeprefix("env:")] = val
+            else:
+                globals()[var] = val
+
+
+def download(
+    *,
+    dry_run: bool = False,
+    build: bool = False,
+    trust_all: bool = False,
+):
+    raise NotImplementedError
 
 
 def install(
@@ -191,7 +229,17 @@ def install(
     trust_all: bool = False,
     force_install: bool = False,
 ):
-    pass
+    raise NotImplementedError
+
+
+def bootstrap(
+    *,
+    lfs_version: str,
+    dry_run: bool = False,
+    keep_going: bool = False,
+    force_install: bool = False,
+):
+    raise NotImplementedError
 
 
 def main(
@@ -206,16 +254,28 @@ def main(
         if not val:
             to_delete.add(kwarg)
     for kwarg in to_delete:
-        del kwargs[to_delete]
-    del kwargs["verbose"]  # we don't need to pass this to other commands
+        del kwargs[kwarg]
+    if "verbose" in kwargs:
+        del kwargs["verbose"]
 
     if not sys.stdout.isatty():
         _log.warning(
             "sl-pkg does not have a stable CLI interface. Use with caution in scripts."
         )
-    match kwargs["COMMAND"]:
+    command = kwargs["COMMAND"]
+    del kwargs["COMMAND"]
+    match command.lower():
         case "install":
             install(**kwargs)
+        case "version":
+            print(f"{parser.prog} {__version__}")
+            sys.exit(0)
+        case "download":
+            download(**kwargs)
+        case "bootstrap":
+            bootstrap(**kwargs)
+        case _:
+            raise ValueError(f"unrecognized command {kwargs["COMMAND"]}")
 
 
 if __name__ == "__main__":
@@ -270,7 +330,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("COMMAND")
     parser.add_argument("PACKAGES", nargs="*")
-    logging.basicConfig(stream=sys.stderr, format="{name}: {levelname}: {message}")
+    logging.basicConfig(
+        stream=sys.stderr, format="%(name)s: %(levelname)s: %(message)s"
+    )
     try:
         args = parser.parse_args()
     except argparse.ArgumentError as e:
@@ -285,5 +347,5 @@ if __name__ == "__main__":
             print(e)
             parser.print_usage()
             sys.exit(2)
-    read_config()
+    read_config(CONFIG_FILE)
     main(parser, **vars(args))
