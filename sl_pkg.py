@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.5.4"
+__version__ = "0.0.5.5"
 
 import os
 import sys
@@ -29,6 +29,7 @@ import re
 import subprocess
 import json
 import shutil
+import tarfile
 from io import StringIO
 from typing import Optional, NoReturn, Union, Self, Literal
 from multiprocessing import cpu_count
@@ -45,6 +46,7 @@ MIRROR = "."
 CACHE_DIR = pathlib.Path("/tmp/sl-pkg")
 USR_CACHE_DIR = pathlib.Path(os.environ["HOME"]) / ".cache" / "sl-pkg"
 _ALLOWED_PACKAGE_NAMES = re.compile(r"[a-z0-9\-\+]+")
+VERBOSE = 0
 COMMANDS = {
     "version": "print version information and exit",
     "download": "download packages",
@@ -173,6 +175,7 @@ def _check_pkg_name(pkg: str):
     """Raise ValueError is the package name does not match the
     _ALLOWED_PACKAGE_NAMES regex.
     """
+    _log.debug(f"Making sure {pkg} is a valid name...")
     if not _ALLOWED_PACKAGE_NAMES.fullmatch(pkg):
         raise ValueError(
             f"Invalid package name: {pkg}. Package names can only "
@@ -236,6 +239,7 @@ def yes_or_no(resp: str) -> bool:
 
 def create_cache_dir(cdir: pathlib.Path):
     _log.debug(f"Creating {cdir} if it does not exist...")
+    cdir = pathlib.Path(cdir) if isinstance(cdir, str) else cdir
     try:
         cdir.mkdir(0o755, True, True)
     except FileExistsError:
@@ -251,9 +255,11 @@ def create_cache_dir(cdir: pathlib.Path):
 def passed_inspection(pkg: str) -> bool:
     _check_pkg_name(pkg)
     _log.debug(f"Prompting to inspect {pkg}...")
-    pkg_file = (pathlib.Path(pkg) / "PACKAGE").resolve()
+    pkg_file = (pathlib.Path(CACHE_DIR) / pkg / "PACKAGE").resolve()
     if not pkg_file.exists():
-        raise FileNotFoundError("Where is the PACKAGE?")
+        pkg_file = (pathlib.Path(USR_CACHE_DIR) / pkg / "PACKAGE").resolve()
+        if not pkg_file.exists():
+            raise FileNotFoundError("Where is the PACKAGE?")
     if yes_or_no(input(f"inspect PACKAGE file for {pkg}? (highly recommended) ")):
         _log.debug(f"Invoking `{os.environ["PAGER"]} '{pkg_file}'`...")
         subprocess.run([os.environ["PAGER"], str(pkg_file)])
@@ -286,31 +292,144 @@ def get_pkginfo(pkg: str, is_usr: bool = False) -> None:
             _log.debug(f"Successfully saved {pkg_file}.")
 
 
-def get_pkgvar(pkg: str, var: str, is_usr: bool = False):
+def get_pkgvar(pkg: str, var: str, is_usr: bool = False) -> str:
     _check_pkg_name(pkg)
+    _log.debug(f"Retrieving {var} from {pkg}...")
     if is_usr:
         base_path = pathlib.Path(USR_CACHE_DIR)
     else:
         base_path = pathlib.Path(CACHE_DIR)
     pkg_file = (base_path / pkg / "PACKAGE").resolve()
     if not pkg_file.exists():
+        _log.debug(f"{pkg_file} does not exist...")
         get_pkginfo(pkg, is_usr)
     os.chdir(base_path)
     # Prevent hackers from fucking up our system.
     if not re.fullmatch(r"[A-Za-z0-9_]+", var):
         raise ValueError(f"Invalid variable name: {var}")
+    # Run through env -i so we don't expose our environment to the shell.
+    command = [
+        "env",
+        "-i",
+        "bash",
+        "-c",
+        "source %s; echo -n ${%s[@]}" % (pkg_file, var),
+    ]
+    _log.debug(f"Creating sub-process with command line {command}")
     out = subprocess.run(
-        ["bash", "-c", "source %s; echo -n ${%s[@]}" % (pkg_file, var)],
+        command,
         check=True,
         text=True,
         capture_output=True,
     ).stdout
+    _log.debug(f"In {pkg}, {var} = '{out}'.")
     return out
 
 
-def download_pkg(pkg: str):
+# This function is safe to test on your main machine.
+# Don't let it delete or overwrite any of your shit, though.
+def download_pkg(pkg: str, is_usr: bool = False, dest: Optional[pathlib.Path] = None):
+    """Retrieve pkg and its patches and save it to dest, or to the default
+    cache directory if dest is not specified.
+
+    pkg -- the package to retrieve
+    is_usr -- if dest is None, specify if this should be saved to
+              USR_CACHE_DIR instead of the global CACHE_DIR.
+    dest -- save the package to the specified file name or directory, or
+            None to use the default location.
+    """
     _check_pkg_name(pkg)
-    ...
+    if is_usr:
+        base_path = pathlib.Path(USR_CACHE_DIR)
+    else:
+        base_path = pathlib.Path(CACHE_DIR)
+    if get_pkgvar(pkg, "METAPACKAGE", is_usr) == "true":
+        _log.info(f"Not downloading {pkg} because it is a metapackage.")
+        return
+    dest = pathlib.Path(dest) if isinstance(dest, str) else dest
+    if not (dest is None or dest.is_absolute()):
+        dest = (START_DIR / dest).resolve()
+    if get_pkgvar(pkg, "VERSION", is_usr) == "git":
+        if dest is None:
+            dest = base_path / pkg / f"{pkg}-git"
+        elif dest.is_dir():
+            dest /= f"{pkg}-git"
+            dest.resolve()
+        if not dest.parent.exists():
+            _log.debug(f"Creating destination directory {dest.parent}...")
+            dest.parent.mkdir(parents=True)
+        if dest.exists():
+            _log.warning(f"{dest} exists already. Removing...")
+            if dest.is_dir():
+                shutil.rmtree(str(dest))
+            else:
+                os.unlink(dest)
+        command = [
+            "git",
+            "clone",
+            "--recursive",
+            get_pkgvar(pkg, "URL", is_usr),
+            str(dest),
+        ]
+        _log.debug(f"Creating sub-process with command line {command}")
+        try:
+            subprocess.run(
+                command,
+                check=True,
+            )
+        except FileNotFoundError:
+            _log.exception("Cannot call git (is git installed?)")
+        except subprocess.CalledProcessError as e:
+            try:
+                os.chdir(dest)
+                _log.debug(f"Trying to update git repository for {pkg}...")
+                subprocess.run(["git", "pull"], check=True)
+            except (OSError, subprocess.CalledProcessError) as e:
+                _log.exception(f"Failed to clone or update git repository for {pkg}.")
+    else:
+        url = get_pkgvar(pkg, "URL", is_usr)
+        if dest is None:
+            dest = (
+                base_path
+                / pkg
+                / (
+                    f"{pkg}-{get_pkgvar(pkg, "VERSION", is_usr)}.tar"
+                    f".{pathlib.Path(url).suffix}"
+                )
+            )
+        elif dest.is_dir():
+            dest /= (
+                f"{pkg}-{get_pkgvar(pkg, "VERSION", is_usr)}.tar"
+                f"{pathlib.Path(url).suffix}"
+            )
+            dest.resolve()
+        _log.info(f"Saving {url} to {dest}...")
+        with request.urlopen(url) as resp:
+            if resp.status != 200:
+                raise HTTPException(
+                    f"Got status code {resp.status} trying to download {pkg}."
+                )
+            with dest.open("wb") as f:
+                f.write(resp.read())
+
+        for patch_url in get_pkgvar(pkg, "PATCHES", is_usr).split():
+            patch_name = pathlib.Path(patch_url).name
+            dest = base_path / pkg / patch_name
+            if dest.exists():
+                _log.warning(f"{dest} exists already. Overwriting...")
+            _log.info(f"Obtaining patch {patch_name} for {pkg}...")
+            with request.urlopen(patch_url) as resp:
+                if resp.status != 200:
+                    raise HTTPException(
+                        f"Got status code {resp.status} trying to download "
+                        f"patch {patch_name} for {pkg}."
+                    )
+                with dest.open("wb") as f:
+                    f.write(resp.read())
+
+
+def build_pkg(pkg: str):
+    raise NotImplementedError
 
 
 def download_cmd(
@@ -318,9 +437,24 @@ def download_cmd(
     dry_run: bool = False,
     build: bool = False,
     trust_all: bool = False,
+    dest: os.PathLike = START_DIR,
     PACKAGES: list[str],
 ):
-    raise NotImplementedError
+    if not PACKAGES:
+        _log.error("no packages specified")
+        sys.exit(1)
+    for package in PACKAGES:
+        # Ensure the pwd is START_DIR before going any farther
+        os.chdir(START_DIR)
+        get_pkginfo(package, True)
+        if not (trust_all or passed_inspection(package)):
+            continue
+        download_pkg(package, True, dest)
+        if build:
+            try:
+                build_pkg(package)
+            except subprocess.CalledProcessError:
+                _log.exception(f"{package} failed to build")
 
 
 def install_cmd(
@@ -432,9 +566,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "-v",
         "--verbose",
-        action="store_true",
+        action="count",
         default=0,
-        help="say what is being done",
+        help="say what is being done (specify twice for even more verbose)",
+    )
+    parser.add_argument(
+        "-d", "--dest", "--destination", help="when downloading, save to this directory"
     )
     parser.add_argument("COMMAND")
     parser.add_argument("PACKAGES", nargs="*")
@@ -453,10 +590,13 @@ if __name__ == "__main__":
             print(e)
             parser.print_usage()
             sys.exit(2)
-    if args.verbose:
+    VERBOSE = args.verbose
+    if not VERBOSE:
         log_level = logging.INFO
-    else:
+    elif VERBOSE == 1:
         log_level = logging.DEBUG
+    elif VERBOSE > 1:
+        log_level = logging.NOTSET
     logging.basicConfig(
         stream=sys.stderr,
         format="%(name)s: %(levelname)s: %(message)s",
