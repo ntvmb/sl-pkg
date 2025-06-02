@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.5.3"
+__version__ = "0.0.5.4"
 
 import os
 import sys
@@ -300,7 +300,7 @@ def get_pkgvar(pkg: str, var: str, is_usr: bool = False):
     if not re.fullmatch(r"[A-Za-z0-9_]+", var):
         raise ValueError(f"Invalid variable name: {var}")
     out = subprocess.run(
-        ["bash", "-c", f"source {pkg_file}; echo -n ${var}"],
+        ["bash", "-c", "source %s; echo -n ${%s[@]}" % (pkg_file, var)],
         check=True,
         text=True,
         capture_output=True,
