@@ -16,6 +16,9 @@ details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
+
+__version__ = "0.0.5.3"
+
 import os
 import sys
 import urllib.request as request
@@ -27,20 +30,21 @@ import subprocess
 import json
 import shutil
 from io import StringIO
-from typing import Optional, NoReturn, Union, Self
+from typing import Optional, NoReturn, Union, Self, Literal
 from multiprocessing import cpu_count
 from itertools import zip_longest
+from http.client import HTTPException
 
 if sys.platform != "linux":
     raise ValueError("This program requires Linux.")
 
-__version__ = "0.0.5.2"
 _log = logging.getLogger(__name__)
 START_DIR = pathlib.PosixPath(os.getcwd())
 CONFIG_FILE = pathlib.PosixPath("/etc/sl-pkg.json")
 MIRROR = "."
 CACHE_DIR = pathlib.Path("/tmp/sl-pkg")
 USR_CACHE_DIR = pathlib.Path(os.environ["HOME"]) / ".cache" / "sl-pkg"
+_ALLOWED_PACKAGE_NAMES = re.compile(r"[a-z0-9\-\+]+")
 COMMANDS = {
     "version": "print version information and exit",
     "download": "download packages",
@@ -165,6 +169,17 @@ class VersionNumber:
             return __class__(version_tmp.getvalue())
 
 
+def _check_pkg_name(pkg: str):
+    """Raise ValueError is the package name does not match the
+    _ALLOWED_PACKAGE_NAMES regex.
+    """
+    if not _ALLOWED_PACKAGE_NAMES.fullmatch(pkg):
+        raise ValueError(
+            f"Invalid package name: {pkg}. Package names can only "
+            "contain lowercase letters, numbers, dashes, and plus signs."
+        )
+
+
 def print_help(
     command: Optional[str] = None, *, parser: argparse.ArgumentParser
 ) -> NoReturn:
@@ -180,6 +195,7 @@ def print_help(
 
 
 def read_config(file: pathlib.Path = CONFIG_FILE):
+    _log.debug(f"Reading config file {file}...")
     if not file.exists():
         file = pathlib.Path("./sl-pkg.json").resolve()
         if not file.exists():
@@ -201,33 +217,119 @@ def read_config(file: pathlib.Path = CONFIG_FILE):
                 for match in pattern.findall(val):
                     # The use of str.strip is appropriate here because of
                     # the restrictions we put using the regex pattern.
-                    val = val.replace(match, os.environ[match.strip("$()")])
+                    val = val.replace(match, os.environ.get(match.strip("$()"), ""))
             if not re.match("[A-Za-z0-9_]+", var.removeprefix("env:")):
                 raise ValueError(
                     f"Illegal variable name: {var.removeprefix("env:")}\n"
                     "Variable names can only contain alphanumeric characters and underscores."
                 )
+            _log.debug(f"{var} = {val}")
             if var.startswith("env:"):
                 os.environ[var.removeprefix("env:")] = val
             else:
                 globals()[var] = val
 
 
-def download(
+def yes_or_no(resp: str) -> bool:
+    return resp.lower().startswith("y")
+
+
+def create_cache_dir(cdir: pathlib.Path):
+    _log.debug(f"Creating {cdir} if it does not exist...")
+    try:
+        cdir.mkdir(0o755, True, True)
+    except FileExistsError:
+        _log.exception(
+            f"Cannot create cache dir: {cdir} already exists and is not a directory"
+        )
+        raise
+    except OSError as e:
+        _log.critical(f"Cannot create cache dir: {e}")
+        raise
+
+
+def passed_inspection(pkg: str) -> bool:
+    _check_pkg_name(pkg)
+    _log.debug(f"Prompting to inspect {pkg}...")
+    pkg_file = (pathlib.Path(pkg) / "PACKAGE").resolve()
+    if not pkg_file.exists():
+        raise FileNotFoundError("Where is the PACKAGE?")
+    if yes_or_no(input(f"inspect PACKAGE file for {pkg}? (highly recommended) ")):
+        _log.debug(f"Invoking `{os.environ["PAGER"]} '{pkg_file}'`...")
+        subprocess.run([os.environ["PAGER"], str(pkg_file)])
+        return yes_or_no(input("continue operations? "))
+    return True
+
+
+def get_pkginfo(pkg: str, is_usr: bool = False) -> None:
+    _check_pkg_name(pkg)
+    if is_usr:
+        base_path = pathlib.Path(USR_CACHE_DIR)
+    else:
+        base_path = pathlib.Path(CACHE_DIR)
+    pkg_dir = (base_path / pkg).resolve()
+    pkg_dir.mkdir(0o755, exist_ok=True)
+    pkg_file = pkg_dir / "PACKAGE"
+    _log.debug(f"Looking for {pkg}...")
+    _log.debug(f"Will attempt to retrieve {MIRROR}/{pkg}/PACKAGE.")
+    with request.urlopen(f"{MIRROR}/{pkg}/PACKAGE") as resp:
+        if resp.status == 404:
+            try:
+                pkg_dir.rmdir()
+            except OSError as e:
+                _log.warning(f"directory {pkg_dir} was not removed: {e}")
+            raise FileNotFoundError(f"Unable to locate package {pkg}")
+        if resp.status != 200:
+            raise HTTPException(f"Got unexpected status code {resp.status}.")
+        with pkg_file.open("wb") as f:
+            f.write(resp.read())
+            _log.debug(f"Successfully saved {pkg_file}.")
+
+
+def get_pkgvar(pkg: str, var: str, is_usr: bool = False):
+    _check_pkg_name(pkg)
+    if is_usr:
+        base_path = pathlib.Path(USR_CACHE_DIR)
+    else:
+        base_path = pathlib.Path(CACHE_DIR)
+    pkg_file = (base_path / pkg / "PACKAGE").resolve()
+    if not pkg_file.exists():
+        get_pkginfo(pkg, is_usr)
+    os.chdir(base_path)
+    # Prevent hackers from fucking up our system.
+    if not re.fullmatch(r"[A-Za-z0-9_]+"):
+        raise ValueError(f"Invalid variable name: {var}")
+    out = subprocess.run(
+        ["bash", "-c", f"source {pkg_file}; echo -n ${var}"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout
+    return out
+
+
+def download_pkg(pkg: str):
+    _check_pkg_name(pkg)
+    ...
+
+
+def download_cmd(
     *,
     dry_run: bool = False,
     build: bool = False,
     trust_all: bool = False,
+    PACKAGES: list[str],
 ):
     raise NotImplementedError
 
 
-def install(
+def install_cmd(
     *,
     dry_run: bool = False,
     keep_going: bool = False,
     trust_all: bool = False,
     force_install: bool = False,
+    PACKAGES: list[str],
 ):
     raise NotImplementedError
 
@@ -238,7 +340,9 @@ def bootstrap(
     dry_run: bool = False,
     keep_going: bool = False,
     force_install: bool = False,
+    PACKAGES: list[str],
 ):
+    TARGET = PACKAGES[0]
     raise NotImplementedError
 
 
@@ -246,6 +350,8 @@ def main(
     parser: argparse.ArgumentParser,
     **kwargs,
 ) -> None:
+    _log.debug(f"Starting {parser.prog} version {__version__}...")
+    _log.debug(f"Command line: {sys.argv}")
     if kwargs["help"]:
         print_help(kwargs["COMMAND"], parser=parser)
 
@@ -257,29 +363,31 @@ def main(
         del kwargs[kwarg]
     if "verbose" in kwargs:
         del kwargs["verbose"]
-
     if not sys.stdout.isatty():
         _log.warning(
             "sl-pkg does not have a stable CLI interface. Use with caution in scripts."
         )
     command = kwargs["COMMAND"]
     del kwargs["COMMAND"]
+
+    create_cache_dir(CACHE_DIR)
+    create_cache_dir(USR_CACHE_DIR)
     match command.lower():
         case "install":
-            install(**kwargs)
+            install_cmd(**kwargs)
         case "version":
             print(f"{parser.prog} {__version__}")
             sys.exit(0)
         case "download":
-            download(**kwargs)
+            download_cmd(**kwargs)
         case "bootstrap":
             bootstrap(**kwargs)
         case _:
-            raise ValueError(f"unrecognized command {kwargs["COMMAND"]}")
+            raise ValueError(f"unrecognized command {command}")
 
 
 if __name__ == "__main__":
-    # we want our own help option here so add_help must be False
+    # We want our own help option here so add_help must be False.
     parser = argparse.ArgumentParser(
         prog="sl-pkg",
         description="Scratch Linux Packager -- The package manager from Hell",
@@ -324,22 +432,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "-v",
         "--verbose",
-        action="count",
+        action="store_true",
         default=0,
-        help="say what is being done (specify twice for even more verbose)",
+        help="say what is being done",
     )
     parser.add_argument("COMMAND")
     parser.add_argument("PACKAGES", nargs="*")
-    logging.basicConfig(
-        stream=sys.stderr, format="%(name)s: %(levelname)s: %(message)s"
-    )
+
     try:
         args = parser.parse_args()
     except argparse.ArgumentError as e:
         if str(e).endswith("COMMAND"):
             if not ("-h" in sys.argv or "--help" in sys.argv):
-                _log.critical("no command specified")
-                _log.critical(f"try {parser.prog} --help")
+                print(f"{parser.prog}: fatal: no command specified")
+                print(f"try {parser.prog} --help")
                 sys.exit(2)
             else:
                 print_help(parser=parser)
@@ -347,5 +453,14 @@ if __name__ == "__main__":
             print(e)
             parser.print_usage()
             sys.exit(2)
+    if args.verbose:
+        log_level = logging.INFO
+    else:
+        log_level = logging.DEBUG
+    logging.basicConfig(
+        stream=sys.stderr,
+        format="%(name)s: %(levelname)s: %(message)s",
+        level=log_level,
+    )
     read_config(CONFIG_FILE)
     main(parser, **vars(args))

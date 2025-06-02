@@ -4,5 +4,7 @@
     "USR_CACHE_DIR": "$(HOME)/.cache/sl-pkg",
     "env:EDITOR": "vim",
     "env:NINJAJOBS": "$(NPROC)",
-    "env:MAKEFLAGS": "-j$(NPROC)"
+    "env:MAKEFLAGS": "-j$(NPROC)",
+    "env:PAGER": "less",
+    "env:LESS": "-R"
 }
