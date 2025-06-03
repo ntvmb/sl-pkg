@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.5.6"
+__version__ = "0.0.5.7"
 
 import os
 import sys
@@ -30,8 +30,9 @@ import subprocess
 import json
 import shutil
 import tarfile
+from datetime import datetime, timezone
 from io import StringIO
-from typing import Optional, NoReturn, Union, Self, Literal
+from typing import Optional, NoReturn, Union, Self
 from multiprocessing import cpu_count
 from itertools import zip_longest
 from http.client import HTTPException
@@ -45,6 +46,8 @@ CONFIG_FILE = pathlib.PosixPath("/etc/sl-pkg.json")
 MIRROR = "."
 CACHE_DIR = pathlib.Path("/tmp/sl-pkg")
 USR_CACHE_DIR = pathlib.Path(os.environ["HOME"]) / ".cache" / "sl-pkg"
+_PACKAGES_DB = pathlib.Path("/var/lib/sl-pkg/packages.json")
+_INSTALLED_PACKAGES_DB = pathlib.Path("/var/lib/sl-pkg/installed_packages.json")
 _ALLOWED_PACKAGE_NAMES = re.compile(r"[a-z0-9\-\+]+")
 VERBOSE = 0
 COMMANDS = {
@@ -55,10 +58,12 @@ COMMANDS = {
 }
 os.environ["NPROC"] = str(cpu_count())
 
-if not hasattr(tarfile.TarFile, "extraction_filter"):
-    raise RuntimeError(
-        "This program requires Python 3.12 or later. Update your Python version."
-    )
+# sl-pkg uses a custom TarFile extraction filter which is required to
+# ensure our source files end up in the right place.
+# TarFile.extraction_filter is only available in Python 3.12 and later.
+assert hasattr(
+    tarfile.TarFile, "extraction_filter"
+), "This program requires Python 3.12 or later. Update your Python version."
 
 
 class VersionNumber:
@@ -186,6 +191,43 @@ def _check_pkg_name(pkg: str):
             f"Invalid package name: {pkg}. Package names can only "
             "contain lowercase letters, numbers, dashes, and plus signs."
         )
+
+
+def put_installed_pkg(pkg: str) -> None:
+    installed_pkg_info = {
+        pkg: {
+            "VERSION": get_pkgvar(pkg, "VERSION"),
+            "DEPENDS": get_pkgvar(pkg, "DEPENDS").split(),
+            "BUILD_DEPENDS": get_pkgvar(pkg, "BUILD_DEPENDS").split(),
+            "OPTDEPENDS": get_pkgvar(pkg, "OPTDEPENDS").split(),
+            "DESCRIPTION": get_pkgvar(pkg, "DESCRIPTION"),
+            "ESSENTIAL": True if get_pkgvar(pkg, "ESSENTIAL") == "true" else False,
+            "INSTALL_TIME": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+    if not _INSTALLED_PACKAGES_DB.exists():
+        _INSTALLED_PACKAGES_DB.parent.mkdir(0o755, True, True)
+        with _INSTALLED_PACKAGES_DB.open("w") as fp:
+            fp.write(json.dumps(installed_pkg_info))
+    else:
+        with _INSTALLED_PACKAGES_DB.open("r+") as fp:
+            data = json.load(fp)
+            data.update(installed_pkg_info)
+            # Reset the file pointer back to the beginning
+            fp.seek(0)
+            json.dump(data, fp)
+
+
+def get_installed_pkg(pkg: str) -> Optional[dict]:
+    if not _INSTALLED_PACKAGES_DB.exists():
+        _log.warning(
+            f"Tried to query installed package {pkg}, "
+            f"but {_INSTALLED_PACKAGES_DB} does not exist."
+        )
+        return None
+    with _INSTALLED_PACKAGES_DB.open() as fp:
+        data = json.load(fp)
+        return data.get(pkg)
 
 
 def has_all_deps(pkg: str) -> bool:
@@ -545,47 +587,76 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
     os.chdir(src)
     _log.info(f"Preparing to build {pkg}...")
     out = subprocess.run(
-        ["bash", "-c", f"source {base_path / pkg / "PACKAGE"}; prepare"],
-        capture_output=(not VERBOSE),
+        ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; prepare"],
+        capture_output=True,
     )
-    if not VERBOSE:
-        with (src / "prepare.log").open("ab") as log:
-            log.write(b"Started build\nstderr:")
-            log.write(out.stderr)
-            log.write(b"\nstdout:")
-            log.write(out.stdout)
+    with (src / "prepare.log").open("ab") as log:
+        log.write(b"Started prepare\nstderr:")
+        log.write(out.stderr)
+        log.write(b"\nstdout:")
+        log.write(out.stdout)
     if out.returncode != 0:
-        if not VERBOSE:
-            raise subprocess.CalledProcessError(
-                f"Subprocess returned code {out.returncode}. "
-                f"Consult {src / "build.log"} for more information."
-            )
-        else:
-            raise subprocess.CalledProcessError(
-                f"Subprocess returned code {out.returncode}"
-            )
+        raise subprocess.CalledProcessError(
+            f"Subprocess returned code {out.returncode}. "
+            f"Consult {src / "build.log"} for more information."
+        )
     _log.info(f"Building {pkg}...")
     out = subprocess.run(
-        ["bash", "-c", f"source {base_path / pkg / "PACKAGE"}; build"],
-        capture_output=(not VERBOSE),
+        ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; build"],
+        capture_output=True,
     )
-    if not VERBOSE:
-        with (src / "build.log").open("ab") as log:
-            log.write(b"Started build\nstderr:")
-            log.write(out.stderr)
-            log.write(b"\nstdout:")
-            log.write(out.stdout)
+    with (src / "build.log").open("ab") as log:
+        log.write(b"Started build\nstderr:")
+        log.write(out.stderr)
+        log.write(b"\nstdout:")
+        log.write(out.stdout)
     if out.returncode != 0:
-        if not VERBOSE:
-            raise subprocess.CalledProcessError(
-                f"Subprocess returned code {out.returncode}. "
-                f"Consult {src / "build.log"} for more information."
-            )
-        else:
-            raise subprocess.CalledProcessError(
-                f"Subprocess returned code {out.returncode}"
-            )
+        raise subprocess.CalledProcessError(
+            f"Subprocess returned code {out.returncode}. "
+            f"Consult {src / "build.log"} for more information."
+        )
     _log.info(f"{pkg} built successfully.")
+
+
+# This function is not safe to test on your main machine unless you
+# are 100% certain that you're in chroot.
+def install_pkg(pkg: str):
+    _check_pkg_name(pkg)
+    base_path = pathlib.Path(CACHE_DIR)
+    version = get_pkgvar(pkg, "VERSION")
+    src = base_path / pkg / f"{pkg}-{version}"
+    os.chdir(src)
+    _log.info(f"Installing {pkg} ({version})...")
+    out = subprocess.run(
+        ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; do_install"],
+        capture_output=True,
+    )
+    with (src / "install.log").open("ab") as log:
+        log.write(b"Started install\nstderr:")
+        log.write(out.stderr)
+        log.write(b"\nstdout:")
+        log.write(out.stdout)
+    if out.returncode != 0:
+        raise subprocess.CalledProcessError(
+            f"Subprocess returned code {out.returncode}. "
+            f"Consult {src / "install.log"} for more information."
+        )
+    _log.info(f"Running post-installation script for {pkg}...")
+    out = subprocess.run(
+        ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; postinst"],
+        capture_output=True,
+    )
+    with (src / "postinst.log").open("ab") as log:
+        log.write(b"Started postinst\nstderr:")
+        log.write(out.stderr)
+        log.write(b"\nstdout:")
+        log.write(out.stdout)
+    if out.returncode != 0:
+        _log.warning(
+            f"Post-install script for {pkg} returned non-zero status code "
+            f"{out.returncode}. Please check {src / "postinst.log"}."
+        )
+    put_installed_pkg(pkg)
 
 
 def download_cmd(
@@ -611,6 +682,7 @@ def download_cmd(
                 build_pkg(package, True, tar_file)
             except subprocess.CalledProcessError:
                 _log.exception(f"{package} failed to build")
+    os.chdir(START_DIR)
 
 
 def install_cmd(
@@ -621,7 +693,36 @@ def install_cmd(
     force_install: bool = False,
     PACKAGES: list[str],
 ):
-    raise NotImplementedError
+    if os.geteuid():
+        raise PermissionError(f"You're not root. I can't let you do that.")
+    if not PACKAGES:
+        _log.error("no packages specified")
+        sys.exit(1)
+    for package in PACKAGES:
+        os.chdir(START_DIR)
+        get_pkginfo(package)
+        if not (trust_all or passed_inspection(package)):
+            break
+        download_pkg(package)
+        try:
+            build_pkg(package)
+        except (OSError, subprocess.SubprocessError):
+            if not force_install:
+                if keep_going:
+                    _log.exception(f"Failed to build {package}!")
+                    continue
+                _log.error(f"Failed to build {package}!")
+                raise
+            _log.exception(f"Failed to build {package}!")
+        try:
+            install_pkg(package)
+        except (OSError, subprocess.SubprocessError):
+            if keep_going:
+                _log.exception(f"Failed to install {package}!")
+                continue
+            _log.error(f"Failed to build {package}!")
+            raise
+    os.chdir(START_DIR)
 
 
 def bootstrap(
