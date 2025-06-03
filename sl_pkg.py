@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.5.5"
+__version__ = "0.0.5.6"
 
 import os
 import sys
@@ -54,6 +54,11 @@ COMMANDS = {
     "bootstrap": "deploy an LFS system",
 }
 os.environ["NPROC"] = str(cpu_count())
+
+if not hasattr(tarfile.TarFile, "extraction_filter"):
+    raise RuntimeError(
+        "This program requires Python 3.12 or later. Update your Python version."
+    )
 
 
 class VersionNumber:
@@ -183,6 +188,11 @@ def _check_pkg_name(pkg: str):
         )
 
 
+def has_all_deps(pkg: str) -> bool:
+    """This will be implemented eventually. For now it always returns True."""
+    return True
+
+
 def print_help(
     command: Optional[str] = None, *, parser: argparse.ArgumentParser
 ) -> NoReturn:
@@ -267,6 +277,44 @@ def passed_inspection(pkg: str) -> bool:
     return True
 
 
+def _sl_pkg_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
+    new_attrs = {}
+    name = member.name
+    dest_path = os.path.realpath(dest_path)
+    # Strip leading . and / from filenames.
+    if name.startswith((".", "/")):
+        name = new_attrs["name"] = member.path.lstrip("./")
+    # Also strip the first component from file names
+    name = new_attrs["name"] = re.sub(r"^[^\/]+\/", "", name, count=1)
+    mode = member.mode
+    if mode is not None:
+        # No high bits or writing by others allowed.
+        mode &= 0o755
+        if member.isreg() or member.islnk():
+            if not mode & 0o100:
+                # Clear executable bits if not executable by owner
+                mode &= ~0o111
+            # Make sure we can read and write to this
+            mode |= 0o600
+        elif member.isdir() or member.issym():
+            # If an attribute is none it's ignored
+            mode = None
+        if mode != member.mode:
+            new_attrs["mode"] = mode
+    # Ignore ownership (this is especially important if we are root)
+    if member.uid is not None:
+        new_attrs["uid"] = None
+    if member.gid is not None:
+        new_attrs["gid"] = None
+    if member.uname is not None:
+        new_attrs["uname"] = None
+    if member.gname is not None:
+        new_attrs["gname"] = None
+    if new_attrs:
+        return member.replace(**new_attrs, deep=False)
+    return member
+
+
 def get_pkginfo(pkg: str, is_usr: bool = False) -> None:
     _check_pkg_name(pkg)
     if is_usr:
@@ -328,7 +376,9 @@ def get_pkgvar(pkg: str, var: str, is_usr: bool = False) -> str:
 
 # This function is safe to test on your main machine.
 # Don't let it delete or overwrite any of your shit, though.
-def download_pkg(pkg: str, is_usr: bool = False, dest: Optional[pathlib.Path] = None):
+def download_pkg(
+    pkg: str, is_usr: bool = False, dest: Optional[pathlib.Path] = None
+) -> pathlib.Path:
     """Retrieve pkg and its patches and save it to dest, or to the default
     cache directory if dest is not specified.
 
@@ -426,10 +476,116 @@ def download_pkg(pkg: str, is_usr: bool = False, dest: Optional[pathlib.Path] = 
                     )
                 with dest.open("wb") as f:
                     f.write(resp.read())
+    return dest
 
 
-def build_pkg(pkg: str):
-    raise NotImplementedError
+# This function is also safe to test on your main machine.
+def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None):
+    _check_pkg_name(pkg)
+    if is_usr:
+        base_path = pathlib.Path(USR_CACHE_DIR)
+    else:
+        base_path = pathlib.Path(CACHE_DIR)
+    if get_pkgvar(pkg, "METAPACKAGE", is_usr) == "true":
+        _log.info(f"Not building {pkg} because it is a metapackage.")
+        return
+    src = pathlib.Path(src) if isinstance(src, str) else src
+    if not (src is None or src.is_absolute()):
+        src = (START_DIR / src).resolve()
+    if get_pkgvar(pkg, "VERSION", is_usr) == "git":
+        if src is None:
+            src = base_path / pkg / f"{pkg}-git"
+        elif src.is_dir():
+            src /= f"{pkg}-git"
+            src.resolve()
+        _log.debug(f"Will attempt to build from {src}.")
+        if not src.exists():
+            raise FileNotFoundError(f"Source directory {src} does not exist.")
+        os.chdir(src)
+    else:
+        if src is None:
+            src = base_path / pkg / f"{pkg}-{get_pkgvar(pkg, "VERSION", is_usr)}"
+            src.mkdir(0o755, True, True)
+            src_glob = list(src.parent.glob("*.tar*"))
+            if len(src_glob) > 1:
+                raise ValueError(
+                    f"I found multiple tar files in {src} and "
+                    "I don't know which one to extract."
+                )
+            elif not src_glob:
+                raise FileNotFoundError(
+                    f"I can't build anything without a tar file in {src}!"
+                )
+            src_tar = src_glob[0]
+        elif src.is_dir():
+            src = src / f"{pkg}-{get_pkgvar(pkg, "VERSION", is_usr)}"
+            src.mkdir(0o755, True, True)
+            src_glob = list(src.parent.glob("*.tar*"))
+            if len(src_glob) > 1:
+                raise ValueError(
+                    f"I found multiple tar files in {src} and "
+                    "I don't know which one to extract."
+                )
+            elif not src_glob:
+                raise FileNotFoundError(
+                    f"I can't build anything without a tar file in {src}!"
+                )
+            src_tar = src_glob[0]
+            src_tar.resolve()
+        elif src.exists():
+            src_tar = src
+            src = src_tar.parent / f"{pkg}-{get_pkgvar(pkg, "VERSION", is_usr)}"
+            src.mkdir(0o755, True, True)
+        else:
+            raise FileNotFoundError(f"I could not find {src}.")
+        os.chdir(src)
+        _log.info(f"Extracting {src_tar}...")
+        with tarfile.open(src_tar, debug=VERBOSE) as tf:
+            tf.extractall(filter=_sl_pkg_filter)
+    os.chdir(src)
+    _log.info(f"Preparing to build {pkg}...")
+    out = subprocess.run(
+        ["bash", "-c", f"source {base_path / pkg / "PACKAGE"}; prepare"],
+        capture_output=(not VERBOSE),
+    )
+    if not VERBOSE:
+        with (src / "prepare.log").open("ab") as log:
+            log.write(b"Started build\nstderr:")
+            log.write(out.stderr)
+            log.write(b"\nstdout:")
+            log.write(out.stdout)
+    if out.returncode != 0:
+        if not VERBOSE:
+            raise subprocess.CalledProcessError(
+                f"Subprocess returned code {out.returncode}. "
+                f"Consult {src / "build.log"} for more information."
+            )
+        else:
+            raise subprocess.CalledProcessError(
+                f"Subprocess returned code {out.returncode}"
+            )
+    _log.info(f"Building {pkg}...")
+    out = subprocess.run(
+        ["bash", "-c", f"source {base_path / pkg / "PACKAGE"}; build"],
+        capture_output=(not VERBOSE),
+    )
+    if not VERBOSE:
+        with (src / "build.log").open("ab") as log:
+            log.write(b"Started build\nstderr:")
+            log.write(out.stderr)
+            log.write(b"\nstdout:")
+            log.write(out.stdout)
+    if out.returncode != 0:
+        if not VERBOSE:
+            raise subprocess.CalledProcessError(
+                f"Subprocess returned code {out.returncode}. "
+                f"Consult {src / "build.log"} for more information."
+            )
+        else:
+            raise subprocess.CalledProcessError(
+                f"Subprocess returned code {out.returncode}"
+            )
+    _log.info(f"{pkg} built successfully.")
 
 
 def download_cmd(
@@ -449,10 +605,10 @@ def download_cmd(
         get_pkginfo(package, True)
         if not (trust_all or passed_inspection(package)):
             continue
-        download_pkg(package, True, dest)
+        tar_file = download_pkg(package, True, dest)
         if build:
             try:
-                build_pkg(package)
+                build_pkg(package, True, tar_file)
             except subprocess.CalledProcessError:
                 _log.exception(f"{package} failed to build")
 
@@ -518,6 +674,7 @@ def main(
             bootstrap(**kwargs)
         case _:
             raise ValueError(f"unrecognized command {command}")
+    os.chdir(START_DIR)
 
 
 if __name__ == "__main__":
