@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.8"
+__version__ = "0.0.8.1"
 
 import os
 import sys
@@ -607,7 +607,7 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
             f"Consult {src / "build.log"} for more information."
         )
     # ensure we're in the correct build directory before going any farther
-    if (src / "build").exists():
+    if (src / "build").is_dir():
         os.chdir(src / "build")
     _log.info(f"Building {pkg}...")
     out = subprocess.run(
@@ -635,6 +635,8 @@ def install_pkg(pkg: str):
     version = get_pkgvar(pkg, "VERSION")
     src = base_path / pkg / f"{pkg}-{version}"
     os.chdir(src)
+    if (src / "build").is_dir():
+        os.chdir(src / "build")
     _log.info(f"Installing {pkg} ({version})...")
     out = subprocess.run(
         ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; do_install"],
@@ -863,7 +865,9 @@ def bootstrap(
     command += ["/usr/bin/sl-pkg", "install", "--trust-all"]
     if VERBOSE:
         command.append("-v")
-    if keep_going or force_install:
+    if keep_going:
+        command.append("-k")
+    if force_install:
         command.append("--force-install")
     out = subprocess.run(command)
     _log.info("Cleaning up...")
