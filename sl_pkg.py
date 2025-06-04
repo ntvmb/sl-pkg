@@ -790,7 +790,7 @@ def bootstrap(
     _log.info("Extracting...")
     # This is very insecure... oh well...
     with tarfile.open(tarball) as tf:
-        tf.extractall(f"{target}", filter="data")
+        tf.extractall(f"{target}", filter="tar")
 
     _log.info("Preparing chroot environment...")
     for d in ["dev", "proc", "sys", "run"]:
