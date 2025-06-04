@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.7"
+__version__ = "0.0.8"
 
 import os
 import sys
@@ -597,27 +597,30 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
         capture_output=True,
     )
     with (src / "prepare.log").open("ab") as log:
-        log.write(b"Started prepare\nstderr:")
+        log.write(b"Started prepare\nstderr:\n")
         log.write(out.stderr)
-        log.write(b"\nstdout:")
+        log.write(b"\nstdout:\n")
         log.write(out.stdout)
     if out.returncode != 0:
-        raise subprocess.CalledProcessError(
+        raise RuntimeError(
             f"Subprocess returned code {out.returncode}. "
             f"Consult {src / "build.log"} for more information."
         )
+    # ensure we're in the correct build directory before going any farther
+    if (src / "build").exists():
+        os.chdir(src / "build")
     _log.info(f"Building {pkg}...")
     out = subprocess.run(
         ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; build"],
         capture_output=True,
     )
     with (src / "build.log").open("ab") as log:
-        log.write(b"Started build\nstderr:")
+        log.write(b"Started build\nstderr:\n")
         log.write(out.stderr)
-        log.write(b"\nstdout:")
+        log.write(b"\nstdout:\n")
         log.write(out.stdout)
     if out.returncode != 0:
-        raise subprocess.CalledProcessError(
+        raise RuntimeError(
             f"Subprocess returned code {out.returncode}. "
             f"Consult {src / "build.log"} for more information."
         )
@@ -638,12 +641,12 @@ def install_pkg(pkg: str):
         capture_output=True,
     )
     with (src / "install.log").open("ab") as log:
-        log.write(b"Started install\nstderr:")
+        log.write(b"Started install\nstderr:\n")
         log.write(out.stderr)
-        log.write(b"\nstdout:")
+        log.write(b"\nstdout:\n")
         log.write(out.stdout)
     if out.returncode != 0:
-        raise subprocess.CalledProcessError(
+        raise RuntimeError(
             f"Subprocess returned code {out.returncode}. "
             f"Consult {src / "install.log"} for more information."
         )
@@ -653,9 +656,9 @@ def install_pkg(pkg: str):
         capture_output=True,
     )
     with (src / "postinst.log").open("ab") as log:
-        log.write(b"Started postinst\nstderr:")
+        log.write(b"Started postinst\nstderr:\n")
         log.write(out.stderr)
-        log.write(b"\nstdout:")
+        log.write(b"\nstdout:\n")
         log.write(out.stdout)
     if out.returncode != 0:
         _log.warning(
