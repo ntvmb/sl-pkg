@@ -598,11 +598,12 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
             get_pkgvar(pkg, "REQUIRES_MANUAL_INTERACTION", is_usr) != "true"
         ),
     )
-    with (src / "prepare.log").open("ab") as log:
-        log.write(b"Started prepare\nstderr:\n")
-        log.write(out.stderr)
-        log.write(b"\nstdout:\n")
-        log.write(out.stdout)
+    if out.stdout is not None:
+        with (src / "prepare.log").open("ab") as log:
+            log.write(b"Started prepare\nstderr:\n")
+            log.write(out.stderr)
+            log.write(b"\nstdout:\n")
+            log.write(out.stdout)
     if out.returncode != 0:
         raise RuntimeError(
             f"Subprocess returned code {out.returncode}. "
@@ -619,11 +620,12 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
             get_pkgvar(pkg, "REQUIRES_MANUAL_INTERACTION", is_usr) != "true"
         ),
     )
-    with (src / "build.log").open("ab") as log:
-        log.write(b"Started build\nstderr:\n")
-        log.write(out.stderr)
-        log.write(b"\nstdout:\n")
-        log.write(out.stdout)
+    if out.stdout is not None:
+        with (src / "build.log").open("ab") as log:
+            log.write(b"Started build\nstderr:\n")
+            log.write(out.stderr)
+            log.write(b"\nstdout:\n")
+            log.write(out.stdout)
     if out.returncode != 0:
         raise RuntimeError(
             f"Subprocess returned code {out.returncode}. "
@@ -650,11 +652,12 @@ def install_pkg(pkg: str):
             get_pkgvar(pkg, "REQUIRES_MANUAL_INTERACTION", False) != "true"
         ),
     )
-    with (src / "install.log").open("ab") as log:
-        log.write(b"Started install\nstderr:\n")
-        log.write(out.stderr)
-        log.write(b"\nstdout:\n")
-        log.write(out.stdout)
+    if out.stdout is not None:
+        with (src / "install.log").open("ab") as log:
+            log.write(b"Started install\nstderr:\n")
+            log.write(out.stderr)
+            log.write(b"\nstdout:\n")
+            log.write(out.stdout)
     if out.returncode != 0:
         raise RuntimeError(
             f"Subprocess returned code {out.returncode}. "
@@ -667,11 +670,12 @@ def install_pkg(pkg: str):
             get_pkgvar(pkg, "REQUIRES_MANUAL_INTERACTION", False) != "true"
         ),
     )
-    with (src / "postinst.log").open("ab") as log:
-        log.write(b"Started postinst\nstderr:\n")
-        log.write(out.stderr)
-        log.write(b"\nstdout:\n")
-        log.write(out.stdout)
+    if out.stdout is not None:
+        with (src / "postinst.log").open("ab") as log:
+            log.write(b"Started postinst\nstderr:\n")
+            log.write(out.stderr)
+            log.write(b"\nstdout:\n")
+            log.write(out.stdout)
     if out.returncode != 0:
         _log.warning(
             f"Post-install script for {pkg} returned non-zero status code "
