@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.5.7"
+__version__ = "0.0.6"
 
 import os
 import sys
@@ -239,6 +239,7 @@ def print_help(
     command: Optional[str] = None, *, parser: argparse.ArgumentParser
 ) -> NoReturn:
     if command is None:
+        print(f"{parser.prog} -- the package manager from Hell")
         print(f"usage: {parser.prog} [options] COMMAND")
         print("commands:")
         for c, h in COMMANDS.items():
@@ -531,6 +532,11 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
     if get_pkgvar(pkg, "METAPACKAGE", is_usr) == "true":
         _log.info(f"Not building {pkg} because it is a metapackage.")
         return
+    if (
+        get_pkgvar(pkg, "REQUIRES_MANUAL_INTERACTION", is_usr) == "true"
+        and not sys.stdin.isatty()
+    ):
+        raise RuntimeError(f"Package '{pkg}' requires manual interaction to build.")
     src = pathlib.Path(src) if isinstance(src, str) else src
     if not (src is None or src.is_absolute()):
         src = (START_DIR / src).resolve()
@@ -733,8 +739,138 @@ def bootstrap(
     force_install: bool = False,
     PACKAGES: list[str],
 ):
-    TARGET = PACKAGES[0]
-    raise NotImplementedError
+    if os.geteuid():
+        raise PermissionError(f"You're not root. I can't let you do that.")
+    if not PACKAGES:
+        raise ValueError(f"no target specified")
+    elif len(PACKAGES) > 1:
+        raise ValueError(f"extraneous targets specified")
+    target = pathlib.Path(PACKAGES[0]).resolve()
+    if not target.exists():
+        raise FileNotFoundError(f"{target} does not exist.")
+    elif not target.is_dir():
+        raise NotADirectoryError(f"{target} is not a directory.")
+    if not os.path.ismount(target):
+        _log.warning(f"{target} is not a mountpoint.")
+    PACKAGES.clear()
+    _log.debug(f"Looking for LFS {lfs_version}...")
+    _log.debug(f"Attempting to retrieve {MIRROR}/base-{lfs_version}/RELEASE.json...")
+    with request.urlopen(f"{MIRROR}/base-{lfs_version}/RELEASE.json") as resp:
+        if resp.status == 404:
+            raise FileNotFoundError(f"Unable to locate release {lfs_version}")
+        if resp.status != 200:
+            raise HTTPException(f"Got unexpected status code {resp.status}.")
+        release_meta = json.load(resp)
+        _log.debug(f"Successfully loaded release metadata.")
+    with_packages: str = release_meta["WITH_PACKAGES"]
+    _log.info("Resolving required packages...")
+    _log.debug(
+        f"Attempting to retrieve {MIRROR}/base-{lfs_version}" f"/{with_packages}..."
+    )
+    pkgs_file = pathlib.Path(CACHE_DIR) / with_packages
+    with request.urlopen(f"{MIRROR}/base-{lfs_version}/{with_packages}") as resp:
+        if resp.status != 200:
+            raise HTTPException(f"Got unexpected status code {resp.status}.")
+        with pkgs_file.open("wb") as fp:
+            fp.write(resp.read())
+    tarball_url = release_meta["URL"]
+    tarball = (
+        pathlib.Path(CACHE_DIR)
+        / f"base-{lfs_version}.tar{pathlib.Path(tarball_url).suffix}"
+    )
+    _log.info("Downloading base tarball...")
+    _log.debug(f"Retrieving {tarball_url}...")
+    with request.urlopen(tarball_url) as resp:
+        if resp.status == 404:
+            raise FileNotFoundError(f"Cannot find base tarball.")
+        if resp.status != 200:
+            raise HTTPException(f"Got unexpected status code {resp.status}.")
+        with tarball.open("wb") as fp:
+            fp.write(resp.read())
+    _log.info("Extracting...")
+    # This is very insecure... oh well...
+    with tarfile.open(tarball) as tf:
+        tf.extractall(f"{target}", filter="data")
+
+    _log.info("Preparing chroot environment...")
+    for d in ["dev", "proc", "sys", "run"]:
+        (target / d).mkdir(0o755, exist_ok=True)
+    # Mount virtual filesystems
+    subprocess.run(["mount", "--bind", "/dev", f"{target}/dev"], check=True)
+    subprocess.run(
+        [
+            "mount",
+            "-t",
+            "devpts",
+            "devpts",
+            "-o",
+            "gid=5,mode=0620",
+            f"{target}/dev/pts",
+        ],
+        check=True,
+    )
+    subprocess.run(["mount", "-t", "proc", "proc", f"{target}/proc"], check=True)
+    subprocess.run(["mount", "-t", "sysfs", "sysfs", f"{target}/sys"], check=True)
+    subprocess.run(["mount", "-t", "tmpfs", "tmpfs", f"{target}/proc"], check=True)
+    if pathlib.Path("/dev/shm").is_symlink():
+        (target / "dev" / "shm").mkdir(0o1777, exist_ok=True)
+    else:
+        subprocess.run(
+            [
+                "mount",
+                "-t",
+                "tmpfs",
+                "tmpfs",
+                "-o",
+                "nosuid,nodev",
+                f"{target}/dev/shm",
+            ],
+            check=True,
+        )
+    for file in ["inittab", "profile", "inputrc", "resolv.conf", "hosts", "hostname"]:
+        if (pathlib.Path("/etc") / file).exists():
+            shutil.copy(f"/etc/{file}", f"{target}/etc/{file}")
+    for tree in ["sysconfig", "udev/rules.d"]:
+        if (pathlib.Path("/etc") / tree).is_dir():
+            (target / tree).mkdir(0o755, True, True)
+            shutil.copytree(f"/etc/{tree}", f"{target}/etc/{tree}")
+    (target / "etc" / "shells").write_text(
+        "# Begin /etc/shells\n\n" "/bin/sh\n" "/bin/bash\n\n" "# End /etc/shells\n"
+    )
+
+    command = [
+        "xargs",
+        "-a",
+        pkgs_file,
+        "chroot",
+        str(target),
+        "/usr/bin/env",
+        "-i",
+        "HOME=/root",
+        f"TERM={os.getenv("TERM")}",
+        "PATH=/usr/bin:/usr/sbin",
+        f"MAKEFLAGS={os.getenv("MAKEFLAGS")}",
+        f"TESTSUITEFLAGS={os.getenv("TESTSUITEFLAGS")}",
+    ]
+    if VERBOSE > 1:
+        command += ["/bin/bash", "-x"]
+    command += ["/usr/bin/sl-pkg", "install", "--trust-all"]
+    if keep_going:
+        command.append("-k")
+    if force_install:
+        command.append("--force-install")
+    out = subprocess.run(command)
+    _log.info("Cleaning up...")
+    for d in ["dev", "proc", "sys", "run"]:
+        subprocess.run("umount" "-R", f"{target}/{d}")
+    try:
+        shutil.rmtree(f"{target}/var/cache/sl-pkg")
+        shutil.rmtree(f"{target}/root/.cache/sl-pkg")
+    except OSError:
+        _log.warning("Cache not cleared.")
+    if out.returncode != 0:
+        raise subprocess.CalledProcessError("Bootstrap failed.")
+    _log.info("Bootstrap success.")
 
 
 def main(
