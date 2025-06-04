@@ -594,7 +594,9 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
     _log.info(f"Preparing to build {pkg}...")
     out = subprocess.run(
         ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; prepare"],
-        capture_output=True,
+        capture_output=(
+            get_pkgvar(pkg, "REQUIRES_MANUAL_INTERACTION", is_usr) != "true"
+        ),
     )
     with (src / "prepare.log").open("ab") as log:
         log.write(b"Started prepare\nstderr:\n")
@@ -612,7 +614,9 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
     _log.info(f"Building {pkg}...")
     out = subprocess.run(
         ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; build"],
-        capture_output=True,
+        capture_output=(
+            get_pkgvar(pkg, "REQUIRES_MANUAL_INTERACTION", is_usr) != "true"
+        ),
     )
     with (src / "build.log").open("ab") as log:
         log.write(b"Started build\nstderr:\n")
@@ -640,7 +644,9 @@ def install_pkg(pkg: str):
     _log.info(f"Installing {pkg} ({version})...")
     out = subprocess.run(
         ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; do_install"],
-        capture_output=True,
+        capture_output=(
+            get_pkgvar(pkg, "REQUIRES_MANUAL_INTERACTION", False) != "true"
+        ),
     )
     with (src / "install.log").open("ab") as log:
         log.write(b"Started install\nstderr:\n")
@@ -655,7 +661,9 @@ def install_pkg(pkg: str):
     _log.info(f"Running post-installation script for {pkg}...")
     out = subprocess.run(
         ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; postinst"],
-        capture_output=True,
+        capture_output=(
+            get_pkgvar(pkg, "REQUIRES_MANUAL_INTERACTION", False) != "true"
+        ),
     )
     with (src / "postinst.log").open("ab") as log:
         log.write(b"Started postinst\nstderr:\n")
