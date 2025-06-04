@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.8.2"
+__version__ = "0.0.8.3"
 
 import os
 import sys
@@ -591,6 +591,7 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
         with tarfile.open(src_tar, debug=VERBOSE) as tf:
             tf.extractall(filter=_sl_pkg_filter)
     os.chdir(src)
+    _log.debug(f"The working directory is now {os.getcwd()}.")
     _log.info(f"Preparing to build {pkg}...")
     out = subprocess.run(
         ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; prepare"],
@@ -611,6 +612,7 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
     # ensure we're in the correct build directory before going any farther
     if (src / "build").is_dir():
         os.chdir(src / "build")
+        _log.debug(f"The working directory is now {os.getcwd()}.")
     _log.info(f"Building {pkg}...")
     out = subprocess.run(
         ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; build"],
@@ -641,6 +643,7 @@ def install_pkg(pkg: str):
     os.chdir(src)
     if (src / "build").is_dir():
         os.chdir(src / "build")
+    _log.debug(f"The working directory is now {os.getcwd()}.")
     _log.info(f"Installing {pkg} ({version})...")
     out = subprocess.run(
         ["bash", "-xc", f"source {base_path / pkg / "PACKAGE"}; do_install"],
@@ -725,7 +728,7 @@ def install_cmd(
         download_pkg(package)
         try:
             build_pkg(package)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, RuntimeError):
             if not force_install:
                 if keep_going:
                     _log.exception(f"Failed to build {package}!")
@@ -735,7 +738,7 @@ def install_cmd(
             _log.exception(f"Failed to build {package}!")
         try:
             install_pkg(package)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, RuntimeError):
             if keep_going:
                 _log.exception(f"Failed to install {package}!")
                 continue
