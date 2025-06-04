@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.8.4"
+__version__ = "0.0.8.5"
 
 import os
 import sys
@@ -844,11 +844,14 @@ def bootstrap(
         )
     for file in ["inittab", "profile", "inputrc", "resolv.conf", "hosts", "hostname"]:
         if (pathlib.Path("/etc") / file).exists():
-            shutil.copy(f"/etc/{file}", f"{target}/etc/{file}")
+            try:
+                shutil.copy(f"/etc/{file}", f"{target}/etc/{file}")
+            except shutil.SameFileError:
+                pass
     for tree in ["sysconfig", "udev/rules.d"]:
         if (pathlib.Path("/etc") / tree).is_dir():
             (target / tree).mkdir(0o755, True, True)
-            shutil.copytree(f"/etc/{tree}", f"{target}/etc/{tree}")
+            shutil.copytree(f"/etc/{tree}", f"{target}/etc/{tree}", dirs_exist_ok=True)
     (target / "etc" / "shells").write_text(
         "# Begin /etc/shells\n\n" "/bin/sh\n" "/bin/bash\n\n" "# End /etc/shells\n"
     )
