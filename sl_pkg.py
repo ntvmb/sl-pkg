@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.8.3"
+__version__ = "0.0.8.4"
 
 import os
 import sys
@@ -394,7 +394,6 @@ def get_pkgvar(pkg: str, var: str, is_usr: bool = False) -> str:
     if not pkg_file.exists():
         _log.debug(f"{pkg_file} does not exist...")
         get_pkginfo(pkg, is_usr)
-    os.chdir(base_path)
     # Prevent hackers from fucking up our system.
     if not re.fullmatch(r"[A-Za-z0-9_]+", var):
         raise ValueError(f"Invalid variable name: {var}")
