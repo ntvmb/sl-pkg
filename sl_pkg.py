@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.6"
+__version__ = "0.0.6.1"
 
 import os
 import sys
@@ -838,6 +838,7 @@ def bootstrap(
         "# Begin /etc/shells\n\n" "/bin/sh\n" "/bin/bash\n\n" "# End /etc/shells\n"
     )
 
+    _log.info("Entering chroot environment...")
     command = [
         "xargs",
         "-a",
@@ -855,14 +856,12 @@ def bootstrap(
     if VERBOSE > 1:
         command += ["/bin/bash", "-x"]
     command += ["/usr/bin/sl-pkg", "install", "--trust-all"]
-    if keep_going:
-        command.append("-k")
-    if force_install:
+    if keep_going or force_install:
         command.append("--force-install")
     out = subprocess.run(command)
     _log.info("Cleaning up...")
     for d in ["dev", "proc", "sys", "run"]:
-        subprocess.run("umount" "-R", f"{target}/{d}")
+        subprocess.run(["umount", "-R", f"{target}/{d}"])
     try:
         shutil.rmtree(f"{target}/var/cache/sl-pkg")
         shutil.rmtree(f"{target}/root/.cache/sl-pkg")
