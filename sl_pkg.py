@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.6.1"
+__version__ = "0.0.7"
 
 import os
 import sys
@@ -853,9 +853,13 @@ def bootstrap(
         f"MAKEFLAGS={os.getenv("MAKEFLAGS")}",
         f"TESTSUITEFLAGS={os.getenv("TESTSUITEFLAGS")}",
     ]
-    if VERBOSE > 1:
-        command += ["/bin/bash", "-x"]
+    if VERBOSE:
+        command.append("/usr/bin/python3")
+        if VERBOSE > 1:
+            command.append("-v")
     command += ["/usr/bin/sl-pkg", "install", "--trust-all"]
+    if VERBOSE:
+        command.append("-v")
     if keep_going or force_install:
         command.append("--force-install")
     out = subprocess.run(command)
@@ -868,7 +872,7 @@ def bootstrap(
     except OSError:
         _log.warning("Cache not cleared.")
     if out.returncode != 0:
-        raise subprocess.CalledProcessError("Bootstrap failed.")
+        raise RuntimeError("Bootstrap failed.")
     _log.info("Bootstrap success.")
 
 
