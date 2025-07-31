@@ -763,13 +763,15 @@ def install_cmd(
 
 def bootstrap(
     *,
-    lfs_version: str,
+    lfs_version: Optional[str] = None,
     dry_run: bool = False,
     keep_going: bool = False,
     force_install: bool = False,
     resume: bool = False,
     PACKAGES: list[str],
 ):
+    if lfs_version is None and not resume:
+        raise ValueError("one of either --lfs-version or --resume must be specified")
     if os.geteuid():
         raise PermissionError(f"You're not root. I can't let you do that.")
     if not PACKAGES:
