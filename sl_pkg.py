@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-__version__ = "0.0.8.5"
+__version__ = "0.0.9"
 
 import os
 import sys
@@ -193,7 +193,11 @@ def _check_pkg_name(pkg: str):
         )
 
 
-def put_installed_pkg(pkg: str) -> None:
+def put_installed_pkg(pkg: str, root: Optional[pathlib.Path] = None) -> None:
+    if root is not None:
+        installed_packages = root / str(_INSTALLED_PACKAGES_DB).lstrip("/")
+    else:
+        installed_packages = _INSTALLED_PACKAGES_DB
     installed_pkg_info = {
         pkg: {
             "VERSION": get_pkgvar(pkg, "VERSION"),
@@ -203,14 +207,15 @@ def put_installed_pkg(pkg: str) -> None:
             "DESCRIPTION": get_pkgvar(pkg, "DESCRIPTION"),
             "ESSENTIAL": True if get_pkgvar(pkg, "ESSENTIAL") == "true" else False,
             "INSTALL_TIME": datetime.now(timezone.utc).isoformat(),
+            "FILES": [],
         }
     }
-    if not _INSTALLED_PACKAGES_DB.exists():
-        _INSTALLED_PACKAGES_DB.parent.mkdir(0o755, True, True)
-        with _INSTALLED_PACKAGES_DB.open("w") as fp:
+    if not installed_packages.exists():
+        installed_packages.parent.mkdir(0o755, True, True)
+        with installed_packages.open("w") as fp:
             fp.write(json.dumps(installed_pkg_info))
     else:
-        with _INSTALLED_PACKAGES_DB.open("r+") as fp:
+        with installed_packages.open("r+") as fp:
             data = json.load(fp)
             data.update(installed_pkg_info)
             # Reset the file pointer back to the beginning
@@ -218,14 +223,18 @@ def put_installed_pkg(pkg: str) -> None:
             json.dump(data, fp)
 
 
-def get_installed_pkg(pkg: str) -> Optional[dict]:
-    if not _INSTALLED_PACKAGES_DB.exists():
+def get_installed_pkg(pkg: str, root: Optional[pathlib.Path] = None) -> Optional[dict]:
+    if root is not None:
+        installed_packages = root / str(_INSTALLED_PACKAGES_DB).lstrip("/")
+    else:
+        installed_packages = _INSTALLED_PACKAGES_DB
+    if not installed_packages.exists():
         _log.warning(
             f"Tried to query installed package {pkg}, "
-            f"but {_INSTALLED_PACKAGES_DB} does not exist."
+            f"but {installed_packages} does not exist."
         )
         return None
-    with _INSTALLED_PACKAGES_DB.open() as fp:
+    with installed_packages.open() as fp:
         data = json.load(fp)
         return data.get(pkg)
 
@@ -486,7 +495,7 @@ def download_pkg(
                 / pkg
                 / (
                     f"{pkg}-{get_pkgvar(pkg, "VERSION", is_usr)}.tar"
-                    f".{pathlib.Path(url).suffix}"
+                    f"{pathlib.Path(url).suffix}"
                 )
             )
         elif dest.is_dir():
@@ -607,7 +616,7 @@ def build_pkg(pkg: str, is_usr: bool = False, src: Optional[pathlib.Path] = None
     if out.returncode != 0:
         raise RuntimeError(
             f"Subprocess returned code {out.returncode}. "
-            f"Consult {src / "build.log"} for more information."
+            f"Consult {src / "prepare.log"} for more information."
         )
     # ensure we're in the correct build directory before going any farther
     if (src / "build").is_dir():
@@ -696,11 +705,12 @@ def download_cmd(
         _log.error("no packages specified")
         sys.exit(1)
     for package in PACKAGES:
-        # Ensure the pwd is START_DIR before going any farther
-        os.chdir(START_DIR)
         get_pkginfo(package, True)
         if not (trust_all or passed_inspection(package)):
             continue
+    for package in PACKAGES:
+        # Ensure the pwd is START_DIR before going any farther
+        os.chdir(START_DIR)
         tar_file = download_pkg(package, True, dest)
         if build:
             try:
@@ -724,10 +734,11 @@ def install_cmd(
         _log.error("no packages specified")
         sys.exit(1)
     for package in PACKAGES:
-        os.chdir(START_DIR)
         get_pkginfo(package)
         if not (trust_all or passed_inspection(package)):
             break
+    for package in PACKAGES:
+        os.chdir(START_DIR)
         download_pkg(package)
         try:
             build_pkg(package)
@@ -756,6 +767,7 @@ def bootstrap(
     dry_run: bool = False,
     keep_going: bool = False,
     force_install: bool = False,
+    resume: bool = False,
     PACKAGES: list[str],
 ):
     if os.geteuid():
@@ -772,44 +784,53 @@ def bootstrap(
     if not os.path.ismount(target):
         _log.warning(f"{target} is not a mountpoint.")
     PACKAGES.clear()
-    _log.debug(f"Looking for LFS {lfs_version}...")
-    _log.debug(f"Attempting to retrieve {MIRROR}/base-{lfs_version}/RELEASE.json...")
-    with request.urlopen(f"{MIRROR}/base-{lfs_version}/RELEASE.json") as resp:
-        if resp.status == 404:
-            raise FileNotFoundError(f"Unable to locate release {lfs_version}")
-        if resp.status != 200:
-            raise HTTPException(f"Got unexpected status code {resp.status}.")
-        release_meta = json.load(resp)
-        _log.debug(f"Successfully loaded release metadata.")
-    with_packages: str = release_meta["WITH_PACKAGES"]
-    _log.info("Resolving required packages...")
-    _log.debug(
-        f"Attempting to retrieve {MIRROR}/base-{lfs_version}" f"/{with_packages}..."
-    )
-    pkgs_file = pathlib.Path(CACHE_DIR) / with_packages
-    with request.urlopen(f"{MIRROR}/base-{lfs_version}/{with_packages}") as resp:
-        if resp.status != 200:
-            raise HTTPException(f"Got unexpected status code {resp.status}.")
-        with pkgs_file.open("wb") as fp:
-            fp.write(resp.read())
-    tarball_url = release_meta["URL"]
-    tarball = (
-        pathlib.Path(CACHE_DIR)
-        / f"base-{lfs_version}.tar{pathlib.Path(tarball_url).suffix}"
-    )
-    _log.info("Downloading base tarball...")
-    _log.debug(f"Retrieving {tarball_url}...")
-    with request.urlopen(tarball_url) as resp:
-        if resp.status == 404:
-            raise FileNotFoundError(f"Cannot find base tarball.")
-        if resp.status != 200:
-            raise HTTPException(f"Got unexpected status code {resp.status}.")
-        with tarball.open("wb") as fp:
-            fp.write(resp.read())
-    _log.info("Extracting...")
-    # This is very insecure... oh well...
-    with tarfile.open(tarball) as tf:
-        tf.extractall(f"{target}", filter="tar")
+    if resume:
+        if not (pathlib.Path(CACHE_DIR) / "PACKAGES").exists():
+            raise ValueError(
+                "I was told to continue, but there is no PACKAGES file in the cache."
+            )
+    else:
+        _log.debug(f"Looking for LFS {lfs_version}...")
+        _log.debug(
+            f"Attempting to retrieve {MIRROR}/base-{lfs_version}/RELEASE.json..."
+        )
+        with request.urlopen(f"{MIRROR}/base-{lfs_version}/RELEASE.json") as resp:
+            if resp.status == 404:
+                raise FileNotFoundError(f"Unable to locate release {lfs_version}")
+            if resp.status != 200:
+                raise HTTPException(f"Got unexpected status code {resp.status}.")
+            release_meta = json.load(resp)
+            _log.debug(f"Successfully loaded release metadata.")
+        with_packages: str = release_meta["WITH_PACKAGES"]
+        _log.info("Resolving required packages...")
+        _log.debug(
+            f"Attempting to retrieve {MIRROR}/base-{lfs_version}" f"/{with_packages}..."
+        )
+        pkgs_file = pathlib.Path(CACHE_DIR) / "PACKAGES"
+        with request.urlopen(f"{MIRROR}/base-{lfs_version}/{with_packages}") as resp:
+            if resp.status != 200:
+                raise HTTPException(f"Got unexpected status code {resp.status}.")
+            with pkgs_file.open("wb") as fp:
+                fp.write(resp.read())
+        tarball_url = release_meta["URL"]
+        tarball = (
+            pathlib.Path(CACHE_DIR)
+            / f"base-{lfs_version}.tar{pathlib.Path(tarball_url).suffix}"
+        )
+        _log.info("Downloading base tarball...")
+        _log.debug(f"Retrieving {tarball_url}...")
+        with request.urlopen(tarball_url) as resp:
+            if resp.status == 404:
+                raise FileNotFoundError(f"Cannot find base tarball.")
+            if resp.status != 200:
+                raise HTTPException(f"Got unexpected status code {resp.status}.")
+            with tarball.open("wb") as fp:
+                fp.write(resp.read())
+        _log.info("Extracting...")
+        # This is very insecure... oh well...
+        with tarfile.open(tarball) as tf:
+            tf.extractall(f"{target}", filter="tar")
+    pkgs_file = pathlib.Path(CACHE_DIR) / "PACKAGES"
 
     _log.info("Preparing chroot environment...")
     for d in ["dev", "proc", "sys", "run"]:
@@ -854,11 +875,28 @@ def bootstrap(
                 pass
     for tree in ["sysconfig", "udev/rules.d"]:
         if (pathlib.Path("/etc") / tree).is_dir():
-            (target / tree).mkdir(0o755, True, True)
+            (target / "etc" / tree).mkdir(0o755, True, True)
             shutil.copytree(f"/etc/{tree}", f"{target}/etc/{tree}", dirs_exist_ok=True)
-    (target / "etc" / "shells").write_text(
-        "# Begin /etc/shells\n\n" "/bin/sh\n" "/bin/bash\n\n" "# End /etc/shells\n"
-    )
+    if not (target / "etc" / "shells").exists():
+        (target / "etc" / "shells").write_text(
+            "# Begin /etc/shells\n\n" "/bin/sh\n" "/bin/bash\n\n" "# End /etc/shells\n"
+        )
+
+    if resume:
+        _log.info("Determining which packages to install...")
+        tmp_pkgs = pkgs_file.with_suffix(".tmp")
+        tmp_pkgs_list = []
+        with pkgs_file.open() as pkgs:
+            for pkg in pkgs:
+                if not get_installed_pkg(pkg.rstrip("\n"), root=target):
+                    tmp_pkgs_list.append(pkg)
+        with tmp_pkgs.open("w") as fp:
+            fp.writelines(tmp_pkgs_list)
+        try:
+            shutil.copy(str(tmp_pkgs), str(pkgs_file))
+        except shutil.SameFileError:
+            _log.info("There is nothing left to do.")
+            sys.exit(0)
 
     _log.info("Entering chroot environment...")
     command = [
@@ -993,6 +1031,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-d", "--dest", "--destination", help="when downloading, save to this directory"
+    )
+    parser.add_argument(
+        "--resume",
+        help="resume an interrupted bootstrap",
+        action="store_true",
     )
     parser.add_argument("COMMAND")
     parser.add_argument("PACKAGES", nargs="*")
